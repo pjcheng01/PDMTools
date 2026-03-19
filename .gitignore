@@ -1,0 +1,19 @@
+# Build outputs
+**/bin/
+**/obj/
+
+# NuGet
+**/packages/
+*.nupkg
+project.nuget.cache
+
+# User-specific
+*.user
+*.suo
+.vs/
+.vscode/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store
