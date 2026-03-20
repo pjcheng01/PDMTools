@@ -66,65 +66,240 @@ namespace PDMTools.Services
         /// 列舉 Vault 中所有已定義的資料卡變數名稱，排序後回傳。
         /// 若列舉失敗，則回傳內建的 CardVariableSpecs 清單作為備援。
         /// </summary>
-        public async Task<IReadOnlyList<string>> EnumerateVaultVariablesAsync()
+        /// <param name="sampleFilePath">
+        /// 可選：提供一個 Vault 內的檔案路徑，作為列舉卡片變數的樣本。
+        /// 若 Vault 層級列舉失敗，將改從此檔案的變數枚舉器列舉。
+        /// </param>
+        public async Task<IReadOnlyList<string>> EnumerateVaultVariablesAsync(string sampleFilePath = null)
         {
             return await Task.Run(() =>
             {
                 EnsureVaultLogin();
-                return EnumerateVaultVariablesInternal();
+                return EnumerateVaultVariablesInternal(sampleFilePath);
             });
         }
 
+        /// <summary>上次執行列舉的診斷記錄（供 UI 顯示）。</summary>
+        public string LastEnumerationDiag { get; private set; } = string.Empty;
+
+        /// <summary>
+        /// 從指定檔案的 GetEnumeratorVariable() 枚舉所有可用的卡片變數名稱。
+        /// 這是 Vault 層級列舉失敗時的備援方式。
+        /// </summary>
+        private void TryEnumerateFromFile(string filePath, List<string> names, System.Text.StringBuilder diag)
+        {
+            IEdmFolder5 folder = null;
+            IEdmFile5   file   = null;
+            try
+            {
+                file = _vault.GetFileFromPath(filePath, out folder);
+                if (file == null) { diag.AppendLine("TryEnumerateFromFile：找不到檔案。"); return; }
+
+                // 轉型為強型別介面，使用 vtable 而非 IDispatch
+                var enumVarTyped = file.GetEnumeratorVariable() as IEdmEnumeratorVariable10;
+                if (enumVarTyped == null) { diag.AppendLine("TryEnumerateFromFile：GetEnumeratorVariable() 無法轉型。"); return; }
+
+                // 透過介面型別反射找方法（vtable dispatch，不走 IDispatch）
+                var ifaceType   = typeof(IEdmEnumeratorVariable10);
+                var relMethods  = ifaceType
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .Where(m => m.Name.IndexOf("Var",      StringComparison.OrdinalIgnoreCase) >= 0
+                             || m.Name.IndexOf("Variable", StringComparison.OrdinalIgnoreCase) >= 0
+                             || m.Name.IndexOf("Position", StringComparison.OrdinalIgnoreCase) >= 0)
+                    .Select(m => m.Name).Distinct().OrderBy(n => n).ToList();
+                diag.AppendLine($"IEdmEnumeratorVariable10 相關方法：{(relMethods.Count > 0 ? string.Join(", ", relMethods) : "（無）")}");
+
+                var getFirstPos = ifaceType.GetMethod("GetFirstVariablePosition",
+                    BindingFlags.Instance | BindingFlags.Public);
+                var getNextVar  = ifaceType.GetMethod("GetNextVariable",
+                    BindingFlags.Instance | BindingFlags.Public);
+
+                diag.AppendLine($"枚舉器.GetFirstVariablePosition：{(getFirstPos != null ? "找到" : "找不到")}");
+                diag.AppendLine($"枚舉器.GetNextVariable：{(getNextVar != null ? "找到" : "找不到")}");
+
+                if (getFirstPos == null || getNextVar == null)
+                {
+                    diag.AppendLine("介面上找不到位置列舉方法，停止。");
+                    return;
+                }
+
+                // GetFirstVariablePosition 需要 configName 參數（傳 "@" 代表檔案層級）
+                var firstPosParams = getFirstPos.GetParameters();
+                diag.AppendLine($"GetFirstVariablePosition 參數數：{firstPosParams.Length}");
+
+                object posObj;
+                try
+                {
+                    posObj = firstPosParams.Length == 0
+                        ? getFirstPos.Invoke(enumVarTyped, null)
+                        : getFirstPos.Invoke(enumVarTyped, new object[] { "@" });
+                }
+                catch (Exception ex)
+                {
+                    diag.AppendLine($"GetFirstVariablePosition 呼叫失敗：{ex.Message}");
+                    return;
+                }
+
+                // 轉型為 IEdmPos5 使用 vtable
+                var typedPos = posObj as IEdmPos5;
+                if (typedPos == null)
+                {
+                    diag.AppendLine($"pos 無法轉換為 IEdmPos5（型別：{posObj?.GetType()?.FullName ?? "null"}），停止。");
+                    return;
+                }
+
+                var safetyLimit = 1000;
+                while (!typedPos.IsNull && safetyLimit-- > 0)
+                {
+                    object variable;
+                    try
+                    {
+                        var args = new object[] { typedPos };
+                        variable = getNextVar.Invoke(enumVarTyped, args);
+                    }
+                    catch (System.Reflection.TargetInvocationException tie)
+                    {
+                        diag.AppendLine($"枚舉器 GetNextVariable 真實錯誤：{tie.InnerException?.GetType()?.Name}: {tie.InnerException?.Message}");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        diag.AppendLine($"枚舉器 GetNextVariable 失敗：{ex.Message}");
+                        break;
+                    }
+                    if (variable == null) break;
+
+                    // 轉型為強型別取得名稱（vtable）
+                    var typedVar = variable as IEdmVariable5;
+                    if (typedVar != null)
+                    {
+                        var name = typedVar.Name;
+                        if (!string.IsNullOrWhiteSpace(name))
+                            names.Add(name);
+                    }
+                }
+                diag.AppendLine($"檔案層級列舉結果：{names.Count} 個變數");
+            }
+            catch (Exception ex)
+            {
+                diag.AppendLine($"TryEnumerateFromFile 例外：{ex.GetType().Name}: {ex.Message}");
+            }
+            finally
+            {
+                ComHelper.Release(file);
+                ComHelper.Release(folder);
+            }
+        }
+
         /// <summary>同步版本，供已在背景執行緒的呼叫端使用。</summary>
-        private IReadOnlyList<string> EnumerateVaultVariablesInternal()
+        private IReadOnlyList<string> EnumerateVaultVariablesInternal(string sampleFilePath = null)
         {
             var names = new List<string>();
+            var diag  = new System.Text.StringBuilder();
             var vaultType = _vault.GetType();
 
-            // 透過反射嘗試 GetFirstVariablePosition / GetNextVariable
+            // ── 1. 列出 Vault 上所有含 "Var" 或 "Variable" 的方法（診斷用）──
+            var varMethods = vaultType
+                .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .Where(m => m.Name.IndexOf("Var", StringComparison.OrdinalIgnoreCase) >= 0
+                         || m.Name.IndexOf("Variable", StringComparison.OrdinalIgnoreCase) >= 0)
+                .Select(m => m.Name)
+                .Distinct()
+                .OrderBy(n => n)
+                .ToList();
+
+            diag.AppendLine($"Vault 型別：{vaultType.FullName}");
+            diag.AppendLine($"含 Var/Variable 的方法（共 {varMethods.Count}）：");
+            diag.AppendLine(varMethods.Count > 0
+                ? string.Join(", ", varMethods)
+                : "（無）");
+
+            // ── 2. 嘗試 GetFirstVariablePosition / GetNextVariable ──────────
             var getFirstPos = vaultType.GetMethod("GetFirstVariablePosition",
                 BindingFlags.Instance | BindingFlags.Public);
-            var getNextVar = vaultType.GetMethod("GetNextVariable",
+            var getNextVar  = vaultType.GetMethod("GetNextVariable",
                 BindingFlags.Instance | BindingFlags.Public);
+
+            diag.AppendLine($"GetFirstVariablePosition：{(getFirstPos != null ? "找到" : "找不到")}");
+            diag.AppendLine($"GetNextVariable：{(getNextVar != null ? "找到" : "找不到")}");
+
+            // 記錄 GetNextVariable 的參數型別（判斷是否為 ref 參數）
+            if (getNextVar != null)
+            {
+                foreach (var p in getNextVar.GetParameters())
+                    diag.AppendLine($"  參數 {p.Name}：{p.ParameterType.FullName}  IsByRef={p.ParameterType.IsByRef}  IsOut={p.IsOut}");
+            }
 
             if (getFirstPos != null && getNextVar != null)
             {
                 try
                 {
                     var pos = getFirstPos.Invoke(_vault, null);
-                    while (pos != null)
+                    diag.AppendLine($"GetFirstVariablePosition() 回傳型別：{pos?.GetType()?.FullName ?? "null"}");
+
+                    // 將 pos 轉型為強型別介面，使用 vtable 而非 IDispatch（避免 TYPE_E_LIBNOTREGISTERED）
+                    var typedPos = pos as IEdmPos5;
+                    if (typedPos == null)
                     {
-                        try
-                        {
-                            var isNull = pos.GetType()
-                                .GetProperty("IsNull", BindingFlags.Instance | BindingFlags.Public)
-                                ?.GetValue(pos, null);
-                            if (true.Equals(isNull)) break;
-                        }
-                        catch { }
-
-                        object variable;
-                        try { variable = getNextVar.Invoke(_vault, new[] { pos }); }
-                        catch { break; }
-                        if (variable == null) break;
-
-                        try
-                        {
-                            var name = variable.GetType()
-                                .GetProperty("Name", BindingFlags.Instance | BindingFlags.Public)
-                                ?.GetValue(variable, null) as string;
-                            if (!string.IsNullOrWhiteSpace(name))
-                                names.Add(name);
-                        }
-                        catch { }
+                        diag.AppendLine("pos 無法轉換為 IEdmPos5，停止 Vault 層級列舉。");
                     }
+                    else
+                    {
+                        var safetyLimit = 1000;
+                        while (!typedPos.IsNull && safetyLimit-- > 0)
+                        {
+                            object variable;
+                            try
+                            {
+                                // 以強型別 IEdmPos5 傳入，走 vtable dispatch
+                                var args = new object[] { typedPos };
+                                variable = getNextVar.Invoke(_vault, args);
+                            }
+                            catch (System.Reflection.TargetInvocationException tie)
+                            {
+                                diag.AppendLine($"GetNextVariable 真實錯誤：{tie.InnerException?.GetType()?.Name}: {tie.InnerException?.Message}");
+                                break;
+                            }
+                            catch (Exception ex)
+                            {
+                                diag.AppendLine($"GetNextVariable 失敗：{ex.Message}");
+                                break;
+                            }
+                            if (variable == null) break;
+
+                            // 轉型為強型別取得 Name（vtable）
+                            var typedVar = variable as IEdmVariable5;
+                            if (typedVar != null)
+                            {
+                                var name = typedVar.Name;
+                                if (!string.IsNullOrWhiteSpace(name))
+                                    names.Add(name);
+                            }
+                        }
+                    }
+                    diag.AppendLine($"Vault 層級列舉結果：{names.Count} 個變數");
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    diag.AppendLine($"列舉過程例外：{ex.GetType().Name}: {ex.Message}");
+                }
             }
 
-            // 備援：回傳內建清單
+            // ── 3. Vault 層級失敗 → 改從樣本檔案的枚舉器列舉 ──────────────
+            if (names.Count == 0 && !string.IsNullOrWhiteSpace(sampleFilePath))
+            {
+                diag.AppendLine($"→ Vault 層級無結果，改從樣本檔案列舉：{Path.GetFileName(sampleFilePath)}");
+                TryEnumerateFromFile(sampleFilePath, names, diag);
+            }
+
+            // ── 4. 備援 ─────────────────────────────────────────────────────
             if (names.Count == 0)
+            {
+                diag.AppendLine("→ 回退至內建 CardVariableSpecs（25 個）。");
                 names.AddRange(CardVariableSpecs.Select(s => s.Label));
+            }
+
+            LastEnumerationDiag = diag.ToString();
 
             return names
                 .Distinct(StringComparer.OrdinalIgnoreCase)

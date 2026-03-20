@@ -1,107 +1,207 @@
+using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 
 namespace PDMTools
 {
     public partial class ColumnSettingsWindow : Window
     {
-        /// <summary>確定後：使用者勾選的固定欄位清單。</summary>
-        public List<string> SelectedFixedColumns { get; private set; } = new List<string>();
+        // ── 資料來源 ────────────────────────────────────────────────────
+        private readonly List<string> _allAvailable = new List<string>(); // 完整可用清單
+        private readonly ObservableCollection<string> _available  = new ObservableCollection<string>(); // 篩選後顯示
+        private readonly ObservableCollection<string> _selected   = new ObservableCollection<string>(); // 已選（有序）
 
-        /// <summary>確定後：使用者勾選的資料卡變數清單。</summary>
-        public List<string> SelectedVariables { get; private set; } = new List<string>();
+        // ── 輸出屬性 ─────────────────────────────────────────────────────
 
-        /// <summary>確定後：視窗中顯示的所有資料卡變數（含未勾選），供存入 KnownVariables。</summary>
-        public List<string> AllShownVariables { get; private set; } = new List<string>();
+        /// <summary>確定後：使用者選定的欄位清單（依左側順序）。</summary>
+        public List<string> OrderedSelectedItems { get; private set; } = new List<string>();
+
+        /// <summary>確定後：右側清單中所有的變數名稱（供存入 KnownVariables）。</summary>
+        public List<string> AllShownAvailableItems { get; private set; } = new List<string>();
 
         // ── 建構子 ───────────────────────────────────────────────────────
 
+        /// <param name="allItems">所有可選欄位（固定欄 + 資料卡變數）</param>
+        /// <param name="currentSelected">目前已選欄位（依順序）</param>
         public ColumnSettingsWindow(
-            IReadOnlyList<string> allFixedColumns,
-            IReadOnlyList<string> selectedFixedColumns,
-            IReadOnlyList<string> allCardVariables,
-            IReadOnlyList<string> selectedCardVariables)
+            IReadOnlyList<string> allItems,
+            IReadOnlyList<string> currentSelected)
         {
             InitializeComponent();
-            PopulateSection(FixedColumnPanel,  allFixedColumns,   selectedFixedColumns);
-            PopulateSection(VariablePanel,     allCardVariables,  selectedCardVariables);
+
+            var selectedSet = new HashSet<string>(
+                currentSelected ?? new List<string>(),
+                StringComparer.OrdinalIgnoreCase);
+
+            // 已選清單：保留原有順序
+            foreach (var item in currentSelected ?? new List<string>())
+                _selected.Add(item);
+
+            // 可用清單：從 allItems 中排除已選的，依字母排序
+            foreach (var item in allItems ?? new List<string>())
+            {
+                if (!selectedSet.Contains(item))
+                    _allAvailable.Add(item);
+            }
+            _allAvailable.Sort(StringComparer.OrdinalIgnoreCase);
+
+            SelectedList.ItemsSource  = _selected;
+            AvailableList.ItemsSource = _available;
+            RefreshFilter();
             UpdateCount();
         }
 
-        // ── 建立 CheckBox 清單 ───────────────────────────────────────────
+        // ── 搜尋篩選 ─────────────────────────────────────────────────────
 
-        private void PopulateSection(
-            StackPanel panel,
-            IReadOnlyList<string> all,
-            IReadOnlyList<string> selected)
+        private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) => RefreshFilter();
+
+        private void RefreshFilter()
         {
-            panel.Children.Clear();
-            var selectedSet = new System.Collections.Generic.HashSet<string>(
-                selected ?? new List<string>(),
-                System.StringComparer.OrdinalIgnoreCase);
-
-            foreach (var name in all ?? new List<string>())
+            var keyword = SearchBox.Text?.Trim() ?? string.Empty;
+            _available.Clear();
+            foreach (var item in _allAvailable)
             {
-                var cb = new CheckBox
+                if (string.IsNullOrEmpty(keyword) ||
+                    item.IndexOf(keyword, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    Content   = name,
-                    IsChecked = selectedSet.Contains(name),
-                    Margin    = new Thickness(2, 3, 2, 3),
-                    FontSize  = 12
-                };
-                cb.Checked   += (s, e) => UpdateCount();
-                cb.Unchecked += (s, e) => UpdateCount();
-                panel.Children.Add(cb);
+                    _available.Add(item);
+                }
             }
         }
 
+        // ── 穿梭按鈕 ─────────────────────────────────────────────────────
+
+        /// <summary>把右側選取的項目加入左側。</summary>
+        private void AddSelected_Click(object sender, RoutedEventArgs e)
+        {
+            var items = AvailableList.SelectedItems.Cast<string>().ToList();
+            if (items.Count == 0) return;
+            MoveToSelected(items);
+        }
+
+        /// <summary>把右側全部項目加入左側。</summary>
+        private void AddAll_Click(object sender, RoutedEventArgs e)
+        {
+            MoveToSelected(_available.ToList());
+        }
+
+        /// <summary>把左側選取的項目移回右側。</summary>
+        private void RemoveSelected_Click(object sender, RoutedEventArgs e)
+        {
+            var items = SelectedList.SelectedItems.Cast<string>().ToList();
+            if (items.Count == 0) return;
+            MoveToAvailable(items);
+        }
+
+        /// <summary>把左側全部項目移回右側。</summary>
+        private void RemoveAll_Click(object sender, RoutedEventArgs e)
+        {
+            MoveToAvailable(_selected.ToList());
+        }
+
+        private void MoveToSelected(IEnumerable<string> items)
+        {
+            foreach (var item in items)
+            {
+                _selected.Add(item);
+                _allAvailable.Remove(item);
+            }
+            RefreshFilter();
+            UpdateCount();
+        }
+
+        private void MoveToAvailable(IEnumerable<string> items)
+        {
+            foreach (var item in items)
+            {
+                _selected.Remove(item);
+                if (!_allAvailable.Contains(item))
+                {
+                    // 插入到正確的排序位置
+                    var idx = _allAvailable.BinarySearch(item, StringComparer.OrdinalIgnoreCase);
+                    _allAvailable.Insert(idx < 0 ? ~idx : idx, item);
+                }
+            }
+            RefreshFilter();
+            UpdateCount();
+        }
+
+        // ── 雙擊快速移動 ────────────────────────────────────────────────
+
+        private void AvailableList_DoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (AvailableList.SelectedItem is string item)
+                MoveToSelected(new[] { item });
+        }
+
+        private void SelectedList_DoubleClick(object sender, MouseButtonEventArgs e)
+        {
+            if (SelectedList.SelectedItem is string item)
+                MoveToAvailable(new[] { item });
+        }
+
+        // ── 排序（↑ / ↓）────────────────────────────────────────────────
+
+        private void MoveUp_Click(object sender, RoutedEventArgs e)
+        {
+            var indices = SelectedList.SelectedItems
+                .Cast<string>()
+                .Select(s => _selected.IndexOf(s))
+                .OrderBy(i => i)
+                .ToList();
+
+            if (indices.Count == 0 || indices[0] == 0) return;
+
+            foreach (var idx in indices)
+                _selected.Move(idx, idx - 1);
+
+            RestoreSelection(indices.Select(i => i - 1));
+        }
+
+        private void MoveDown_Click(object sender, RoutedEventArgs e)
+        {
+            var indices = SelectedList.SelectedItems
+                .Cast<string>()
+                .Select(s => _selected.IndexOf(s))
+                .OrderByDescending(i => i)
+                .ToList();
+
+            if (indices.Count == 0 || indices[0] == _selected.Count - 1) return;
+
+            foreach (var idx in indices)
+                _selected.Move(idx, idx + 1);
+
+            RestoreSelection(indices.Select(i => i + 1));
+        }
+
+        private void RestoreSelection(IEnumerable<int> indices)
+        {
+            SelectedList.SelectedItems.Clear();
+            foreach (var idx in indices)
+            {
+                if (idx >= 0 && idx < _selected.Count)
+                    SelectedList.SelectedItems.Add(_selected[idx]);
+            }
+        }
+
+        // ── 計數更新 ─────────────────────────────────────────────────────
+
         private void UpdateCount()
         {
-            var allCbs     = AllCheckBoxes().ToList();
-            var checkedCnt = allCbs.Count(c => c.IsChecked == true);
-            CountText.Text = $"已選 {checkedCnt} / {allCbs.Count} 個";
+            var total = _selected.Count + _allAvailable.Count;
+            CountText.Text = $"已選 {_selected.Count} / {total} 個欄位";
         }
 
-        private IEnumerable<CheckBox> AllCheckBoxes() =>
-            FixedColumnPanel.Children.OfType<CheckBox>()
-                .Concat(VariablePanel.Children.OfType<CheckBox>());
-
-        // ── 按鈕事件 ─────────────────────────────────────────────────────
-
-        private void SelectAll_Click(object sender, RoutedEventArgs e)
-        {
-            foreach (var cb in AllCheckBoxes()) cb.IsChecked = true;
-        }
-
-        private void SelectNone_Click(object sender, RoutedEventArgs e)
-        {
-            foreach (var cb in AllCheckBoxes()) cb.IsChecked = false;
-        }
+        // ── 確定 / 取消 ──────────────────────────────────────────────────
 
         private void OK_Click(object sender, RoutedEventArgs e)
         {
-            SelectedFixedColumns = FixedColumnPanel.Children
-                .OfType<CheckBox>()
-                .Where(cb => cb.IsChecked == true)
-                .Select(cb => cb.Content as string)
-                .Where(n => !string.IsNullOrWhiteSpace(n))
-                .ToList();
-
-            var allCardCbs = VariablePanel.Children.OfType<CheckBox>().ToList();
-
-            SelectedVariables = allCardCbs
-                .Where(cb => cb.IsChecked == true)
-                .Select(cb => cb.Content as string)
-                .Where(n => !string.IsNullOrWhiteSpace(n))
-                .ToList();
-
-            AllShownVariables = allCardCbs
-                .Select(cb => cb.Content as string)
-                .Where(n => !string.IsNullOrWhiteSpace(n))
-                .ToList();
-
+            OrderedSelectedItems  = _selected.ToList();
+            AllShownAvailableItems = _allAvailable.ToList();
             DialogResult = true;
         }
 

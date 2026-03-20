@@ -213,7 +213,9 @@ namespace PDMTools
             try
             {
                 _exportService = _exportService ?? new PdmBomExportService();
-                allVars = await _exportService.EnumerateVaultVariablesAsync();
+                // 傳入目前選取的組合件路徑作為樣本，供 Vault 層級失敗時改從檔案列舉
+                var samplePath = AssemblyPathTextBox.Text?.Trim();
+                allVars = await _exportService.EnumerateVaultVariablesAsync(samplePath);
                 ProgressBar.Value = 0;
             }
             catch (Exception ex)
@@ -228,23 +230,38 @@ namespace PDMTools
                 SetUiBusy(false);
             }
 
+            // 若結果等於備援數量，顯示診斷資訊供除錯
+            var fallbackCount = PdmBomExportService.GetOrderedCardVariableLabels().Count;
+            if (allVars.Count == fallbackCount && !string.IsNullOrWhiteSpace(_exportService?.LastEnumerationDiag))
+            {
+                var diagMsg = "⚠ 動態列舉未取得結果，使用內建備援清單。\n\n"
+                            + "── 診斷資訊 ────────────────────────────\n"
+                            + _exportService.LastEnumerationDiag
+                            + "\n請將以上內容回報給開發者以修正 API 呼叫。";
+                MessageBox.Show(this, diagMsg, "變數列舉診斷",
+                    MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+
             await OpenColumnSettingsWindowAsync(allVars);
         }
 
         /// <summary>
-        /// 以指定的完整變數清單開啟設定視窗，儲存結果後更新 DataGrid 欄位。
+        /// 以指定的卡片變數清單開啟設定視窗，儲存結果後更新 DataGrid 欄位。
         /// </summary>
         private async Task OpenColumnSettingsWindowAsync(IReadOnlyList<string> allCardVars)
         {
-            // 固定欄：尚未設定過時，預設全勾選
-            var currentFixed = _activeFixedColumns ?? AllFixedColumnNames.ToList();
+            // 合併所有可選欄位：固定欄在前，卡片變數在後
+            var allItems = AllFixedColumnNames.ToList();
+            allItems.AddRange(allCardVars);
 
-            var win = new ColumnSettingsWindow(
-                AllFixedColumnNames,
-                currentFixed,
-                allCardVars,
-                _activeCardVarNames)
-            { Owner = this };
+            // 合併目前已選欄位（維持順序：固定欄在前，卡片欄在後）
+            var currentFixed = _activeFixedColumns ?? AllFixedColumnNames.ToList();
+            var currentSelected = currentFixed
+                .Concat(_activeCardVarNames)
+                .Where(x => allItems.Contains(x, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
+            var win = new ColumnSettingsWindow(allItems, currentSelected) { Owner = this };
 
             if (win.ShowDialog() != true)
             {
@@ -254,14 +271,19 @@ namespace PDMTools
                 return;
             }
 
-            _activeFixedColumns = win.SelectedFixedColumns ?? new List<string>();
-            _activeCardVarNames = win.SelectedVariables    ?? new List<string>();
+            // 分隔回固定欄位與卡片變數
+            var fixedSet = new HashSet<string>(AllFixedColumnNames, StringComparer.OrdinalIgnoreCase);
+            _activeFixedColumns = win.OrderedSelectedItems
+                .Where(x => fixedSet.Contains(x)).ToList();
+            _activeCardVarNames = win.OrderedSelectedItems
+                .Where(x => !fixedSet.Contains(x)).ToList();
 
             var colSettings = new ColumnSettings
             {
-                SelectedVariables  = _activeCardVarNames,
+                SelectedVariables    = _activeCardVarNames,
                 SelectedFixedColumns = _activeFixedColumns,
-                KnownVariables     = win.AllShownVariables ?? new List<string>()
+                KnownVariables       = win.AllShownAvailableItems
+                    .Where(x => !fixedSet.Contains(x)).ToList()  // 只記卡片變數的 known list
             };
             colSettings.Save();
 
@@ -292,7 +314,8 @@ namespace PDMTools
             try
             {
                 _exportService = _exportService ?? new PdmBomExportService();
-                vaultVars = await _exportService.EnumerateVaultVariablesAsync();
+                vaultVars = await _exportService.EnumerateVaultVariablesAsync(
+                    AssemblyPathTextBox.Text?.Trim());
             }
             catch
             {
