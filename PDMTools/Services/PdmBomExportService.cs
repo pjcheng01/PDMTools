@@ -44,6 +44,13 @@ namespace PDMTools.Services
             new CardVariableSpec("工作流程", "工作流程"),
             new CardVariableSpec("本機版本", "本機版本")
         };
+
+        /// <summary>與 Excel 匯出「Card:」欄位順序一致，供 UI DataGrid 分欄綁定。</summary>
+        private static readonly IReadOnlyList<string> OrderedCardVariableLabelList =
+            CardVariableSpecs.Select(s => s.Label).ToList();
+
+        public static IReadOnlyList<string> GetOrderedCardVariableLabels() => OrderedCardVariableLabelList;
+
         private readonly IEdmVault5 _vault;
 
         public PdmBomExportService()
