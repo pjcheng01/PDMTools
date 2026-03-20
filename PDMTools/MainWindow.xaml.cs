@@ -49,6 +49,9 @@ namespace PDMTools
             StatusTextBlock.Text = ColumnSettings.FileExists
                 ? $"就緒（已載入欄位設定：{_activeCardVarNames.Count} 個）"
                 : "就緒（使用內建欄位設定，可按「設定欄位...」自訂）";
+
+            // 視窗完全載入後，背景偵測 Vault 是否有新變數
+            Loaded += async (s, e) => await CheckForNewVaultVariablesAsync();
         }
 
         // ── DataGrid 欄位建立 ──────────────────────────────────────────────
@@ -179,7 +182,6 @@ namespace PDMTools
             }
             catch (Exception ex)
             {
-                // 即使讀取失敗，仍用現有清單或內建清單開啟視窗
                 StatusTextBlock.Text = $"無法讀取 Vault 變數（{ex.Message}），改用本機已知清單。";
                 allVars = _activeCardVarNames.Count > 0
                     ? _activeCardVarNames
@@ -190,11 +192,15 @@ namespace PDMTools
                 SetUiBusy(false);
             }
 
-            // 開啟設定視窗
-            var win = new ColumnSettingsWindow(allVars, _activeCardVarNames)
-            {
-                Owner = this
-            };
+            await OpenColumnSettingsWindowAsync(allVars);
+        }
+
+        /// <summary>
+        /// 以指定的完整變數清單開啟設定視窗，儲存結果後更新 DataGrid 欄位。
+        /// </summary>
+        private async Task OpenColumnSettingsWindowAsync(IReadOnlyList<string> allVars)
+        {
+            var win = new ColumnSettingsWindow(allVars, _activeCardVarNames) { Owner = this };
 
             if (win.ShowDialog() != true)
             {
@@ -204,13 +210,16 @@ namespace PDMTools
                 return;
             }
 
-            // 套用新設定
             _activeCardVarNames = win.SelectedVariables ?? new List<string>();
 
-            var colSettings = new ColumnSettings { SelectedVariables = _activeCardVarNames };
+            // 同時儲存「已勾選」與「已知清單」
+            var colSettings = new ColumnSettings
+            {
+                SelectedVariables = _activeCardVarNames,
+                KnownVariables    = win.AllShownVariables ?? new List<string>()
+            };
             colSettings.Save();
 
-            // 重建 DataGrid 欄位
             SetupBomDataGridColumns();
 
             if (_bomItems.Count > 0)
@@ -219,6 +228,53 @@ namespace PDMTools
             StatusTextBlock.Text = _bomItems.Count > 0
                 ? $"欄位已更新（{_activeCardVarNames.Count} 個資料卡欄）。請重新抓取以套用至資料。"
                 : $"欄位設定已儲存（{_activeCardVarNames.Count} 個資料卡欄）。";
+        }
+
+        /// <summary>
+        /// 啟動時背景靜默偵測：若 Vault 有新增變數（不在上次已知清單中），跳出提示。
+        /// 任何例外均靜默忽略，不影響正常啟動。
+        /// </summary>
+        private async Task CheckForNewVaultVariablesAsync()
+        {
+            var storedKnown = ColumnSettings.Load().KnownVariables;
+
+            // 尚未設定過（沒有 known list），略過偵測
+            if (storedKnown == null || storedKnown.Count == 0) return;
+
+            IReadOnlyList<string> vaultVars;
+            try
+            {
+                _exportService = _exportService ?? new PdmBomExportService();
+                vaultVars = await _exportService.EnumerateVaultVariablesAsync();
+            }
+            catch
+            {
+                return; // Vault 不可用時靜默略過
+            }
+
+            var knownSet = new HashSet<string>(storedKnown, StringComparer.OrdinalIgnoreCase);
+            var newVars  = new List<string>();
+            foreach (var v in vaultVars)
+            {
+                if (!knownSet.Contains(v)) newVars.Add(v);
+            }
+
+            if (newVars.Count == 0) return;
+
+            // 有新變數：跳出提示
+            StatusTextBlock.Text = $"偵測到 Vault 新增了 {newVars.Count} 個資料卡變數。";
+
+            var msg = $"偵測到 Vault 新增了 {newVars.Count} 個資料卡變數：\n\n"
+                    + string.Join("\n", newVars)
+                    + "\n\n是否立即開啟「設定欄位」視窗？";
+
+            var answer = MessageBox.Show(this, msg, "偵測到新變數",
+                MessageBoxButton.YesNo, MessageBoxImage.Information);
+
+            if (answer == MessageBoxResult.Yes)
+                await OpenColumnSettingsWindowAsync(vaultVars);
+            else
+                StatusTextBlock.Text = $"就緒（{newVars.Count} 個新變數尚未加入，可按「設定欄位...」設定）";
         }
 
         // ── 核心流程 ──────────────────────────────────────────────────────

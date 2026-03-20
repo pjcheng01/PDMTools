@@ -7,8 +7,11 @@ namespace PDMTools
 {
     public partial class ColumnSettingsWindow : Window
     {
-        // 確定後可讀取此清單（有序）
+        /// <summary>確定後：使用者勾選的變數清單。</summary>
         public List<string> SelectedVariables { get; private set; } = new List<string>();
+
+        /// <summary>確定後：視窗中顯示的所有變數（含未勾選），供存入 KnownVariables。</summary>
+        public List<string> AllShownVariables { get; private set; } = new List<string>();
 
         public ColumnSettingsWindow(
             IReadOnlyList<string> allVariables,
@@ -68,9 +71,15 @@ namespace PDMTools
 
         private void OK_Click(object sender, RoutedEventArgs e)
         {
-            SelectedVariables = VariablePanel.Children
-                .OfType<CheckBox>()
+            var allCheckBoxes = VariablePanel.Children.OfType<CheckBox>().ToList();
+
+            SelectedVariables = allCheckBoxes
                 .Where(cb => cb.IsChecked == true)
+                .Select(cb => cb.Content as string)
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .ToList();
+
+            AllShownVariables = allCheckBoxes
                 .Select(cb => cb.Content as string)
                 .Where(n => !string.IsNullOrWhiteSpace(n))
                 .ToList();
