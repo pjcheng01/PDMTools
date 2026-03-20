@@ -393,9 +393,108 @@ namespace PDMTools.Services
                     ComHelper.Release(file);
                 }
 
+                // 用量統計：在父階底下，相同檔案路徑出現幾次（不含工程圖 .SLDDRW）
+                ComputeUsageCounts(items, assemblyPath, includeRootBomItem);
+
                 progress?.Report(new ProgressInfo(75, $"解析完成，共 {items.Count} 筆。"));
                 return (IReadOnlyList<BomItem>)items;
             }, cancellationToken);
+        }
+
+        /// <summary>
+        /// 計算每一列的「用量統計」：
+        /// 同一個父階（由 item.Level 推回）底下，相同檔案路徑（item.FullPath）出現幾次。
+        /// 只統計 .SLDASM/.SLDPRT；.SLDDRW 保持 null。
+        /// </summary>
+        private static void ComputeUsageCounts(
+            IReadOnlyList<BomItem> items,
+            string rootAssemblyPath,
+            bool includeRootBomItem)
+        {
+            // key = parentFullPath|childFullPath
+            // 父階組件的 FullPath 來自 Level 對應的那列；ROOT 則用抓取根組合件路徑。
+            var levelToFullPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var it in items)
+            {
+                if (it == null) continue;
+                if (!IsAsmOrPart(it.FullPath)) continue;
+                if (string.IsNullOrWhiteSpace(it.Level)) continue;
+                levelToFullPath[it.Level] = it.FullPath;
+            }
+
+            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var item in items)
+            {
+                if (item == null) continue;
+                if (!IsAsmOrPart(item.FullPath)) continue;
+
+                // root 本身不顯示 UsageCount
+                if (includeRootBomItem &&
+                    string.Equals(item.FullPath, rootAssemblyPath, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(item.Level, "1", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var parentLevelKey = GetParentLevelKey(item.Level);
+                var parentFullPath = parentLevelKey.Equals("ROOT", StringComparison.OrdinalIgnoreCase)
+                    ? rootAssemblyPath
+                    : (levelToFullPath.TryGetValue(parentLevelKey, out var p) ? p : null);
+
+                if (string.IsNullOrWhiteSpace(parentFullPath)) continue;
+
+                var key = parentFullPath + "|" + item.FullPath;
+                counts.TryGetValue(key, out var c);
+                counts[key] = c + 1;
+            }
+
+            foreach (var item in items)
+            {
+                if (item == null) continue;
+
+                if (!IsAsmOrPart(item.FullPath))
+                {
+                    item.UsageCount = null;
+                    continue;
+                }
+
+                if (includeRootBomItem &&
+                    string.Equals(item.FullPath, rootAssemblyPath, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(item.Level, "1", StringComparison.OrdinalIgnoreCase))
+                {
+                    item.UsageCount = null;
+                    continue;
+                }
+
+                var parentLevelKey = GetParentLevelKey(item.Level);
+                var parentFullPath = parentLevelKey.Equals("ROOT", StringComparison.OrdinalIgnoreCase)
+                    ? rootAssemblyPath
+                    : (levelToFullPath.TryGetValue(parentLevelKey, out var p) ? p : null);
+
+                if (string.IsNullOrWhiteSpace(parentFullPath))
+                {
+                    item.UsageCount = null;
+                    continue;
+                }
+
+                var key = parentFullPath + "|" + item.FullPath;
+                item.UsageCount = counts.TryGetValue(key, out var c) ? c : (int?)null;
+            }
+        }
+
+        private static bool IsAsmOrPart(string fullPath)
+        {
+            if (string.IsNullOrWhiteSpace(fullPath)) return false;
+            var ext = Path.GetExtension(fullPath);
+            return ext != null &&
+                   (ext.Equals(".sldasm", StringComparison.OrdinalIgnoreCase) ||
+                    ext.Equals(".sldprt", StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static string GetParentLevelKey(string level)
+        {
+            if (string.IsNullOrWhiteSpace(level)) return "ROOT";
+            var idx = level.LastIndexOf('.');
+            return idx >= 0 ? level.Substring(0, idx) : "ROOT";
         }
 
         public async Task ExportToExcelAsync(

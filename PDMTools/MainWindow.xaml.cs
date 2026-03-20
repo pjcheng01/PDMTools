@@ -98,6 +98,9 @@ namespace PDMTools
             // Level 永遠顯示
             Add("Level", new Binding("Level") { Mode = BindingMode.OneWay }, 50);
 
+            // 用量統計：在父階底下，相同檔案路徑出現幾次
+            Add("Use Count", new Binding("UsageCount") { Mode = BindingMode.OneWay }, 80);
+
             // 固定欄：依選擇決定是否加入（null = 全顯示）
             var fixedSet = _activeFixedColumns != null
                 ? new HashSet<string>(_activeFixedColumns, StringComparer.OrdinalIgnoreCase)

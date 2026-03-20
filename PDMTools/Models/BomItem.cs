@@ -23,6 +23,12 @@ namespace PDMTools.Models
         /// <summary>此列為工程圖（.SLDDRW），顯示時用不同顏色區隔。</summary>
         public bool IsDrawing { get; set; }
 
+        /// <summary>
+        /// 用量統計：在「父階組件」底下，同一檔案路徑被引用幾次。
+        /// 工程圖列（.SLDDRW）不納入統計，保持 null 以在 UI 顯示空白。
+        /// </summary>
+        public int? UsageCount { get; set; }
+
         /// <summary>供預覽用：將非空白卡片變數濃縮為單一字串。</summary>
         public string CardVariablesDisplay
         {
