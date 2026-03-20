@@ -25,6 +25,18 @@ namespace PDMTools
         private readonly ObservableCollection<BomItem> _bomItems = new ObservableCollection<BomItem>();
         private readonly CardVariableLookupConverter _cardVariableConverter = new CardVariableLookupConverter();
 
+        // ── 固定欄位定義（Level 不在此列，永遠顯示）──────────────────────
+        private static readonly IReadOnlyList<string> AllFixedColumnNames = new List<string>
+        {
+            "File Name", "State", "Workflow State", "Description", "Part Number",
+            "Referenced As", "Full Path",
+            "Description Var Used", "Description Config Used",
+            "Part Number Var Used", "Part Number Config Used"
+        };
+
+        // 目前作用中的固定欄位（null = 全顯示）
+        private List<string> _activeFixedColumns = null;
+
         // 目前作用中的資料卡欄位清單（由設定視窗管理）
         private List<string> _activeCardVarNames = new List<string>();
 
@@ -36,9 +48,12 @@ namespace PDMTools
 
             // 載入已存的欄位設定
             var settings = ColumnSettings.Load();
-            _activeCardVarNames = settings.SelectedVariables ?? new List<string>();
+            _activeCardVarNames  = settings.SelectedVariables ?? new List<string>();
+            _activeFixedColumns  = settings.HasFixedColumnsSetting
+                ? settings.SelectedFixedColumns
+                : null;   // null = 尚未設定，預設全顯示
 
-            // 若尚未設定，使用內建清單作為起始預設
+            // 若尚未設定卡片變數，使用內建清單作為起始預設
             if (_activeCardVarNames.Count == 0)
             {
                 _activeCardVarNames = PdmBomExportService.GetOrderedCardVariableLabels().ToList();
@@ -56,7 +71,7 @@ namespace PDMTools
 
         // ── DataGrid 欄位建立 ──────────────────────────────────────────────
 
-        /// <summary>依 _activeCardVarNames 建立 DataGrid 欄位。</summary>
+        /// <summary>依 _activeFixedColumns + _activeCardVarNames 建立 DataGrid 欄位。</summary>
         private void SetupBomDataGridColumns()
         {
             BomDataGrid.Columns.Clear();
@@ -65,8 +80,8 @@ namespace PDMTools
             {
                 var col = new DataGridTextColumn
                 {
-                    Header = header,
-                    Binding = binding,
+                    Header   = header,
+                    Binding  = binding,
                     MinWidth = minWidth
                 };
                 if (!double.IsPositiveInfinity(maxWidth))
@@ -74,25 +89,46 @@ namespace PDMTools
                 BomDataGrid.Columns.Add(col);
             }
 
-            Add("Level",                  new Binding("Level")              { Mode = BindingMode.OneWay }, 50);
-            Add("File Name",              new Binding("FileName")           { Mode = BindingMode.OneWay }, 90);
-            Add("State",                  new Binding("State")              { Mode = BindingMode.OneWay }, 70);
-            Add("Workflow State",         new Binding("WorkflowState")      { Mode = BindingMode.OneWay }, 90);
-            Add("Description",            new Binding("Description")        { Mode = BindingMode.OneWay }, 80);
-            Add("Part Number",            new Binding("PartNumber")         { Mode = BindingMode.OneWay }, 80);
-            Add("Referenced As",          new Binding("ReferencedAs")       { Mode = BindingMode.OneWay }, 90);
-            Add("Full Path",              new Binding("FullPath")           { Mode = BindingMode.OneWay }, 120, 520);
-            Add("Description Var Used",   new Binding("DescriptionVarUsed") { Mode = BindingMode.OneWay }, 80);
-            Add("Description Config",     new Binding("DescriptionConfigUsed") { Mode = BindingMode.OneWay }, 80);
-            Add("Part Number Var Used",   new Binding("PartNumberVarUsed")  { Mode = BindingMode.OneWay }, 80);
-            Add("Part Number Config",     new Binding("PartNumberConfigUsed") { Mode = BindingMode.OneWay }, 80);
+            // Level 永遠顯示
+            Add("Level", new Binding("Level") { Mode = BindingMode.OneWay }, 50);
 
+            // 固定欄：依選擇決定是否加入（null = 全顯示）
+            var fixedSet = _activeFixedColumns != null
+                ? new HashSet<string>(_activeFixedColumns, StringComparer.OrdinalIgnoreCase)
+                : null;   // null 代表全顯示
+
+            bool ShowFixed(string name) => fixedSet == null || fixedSet.Contains(name);
+
+            if (ShowFixed("File Name"))
+                Add("File Name",            new Binding("FileName")              { Mode = BindingMode.OneWay }, 90);
+            if (ShowFixed("State"))
+                Add("State",                new Binding("State")                 { Mode = BindingMode.OneWay }, 70);
+            if (ShowFixed("Workflow State"))
+                Add("Workflow State",       new Binding("WorkflowState")         { Mode = BindingMode.OneWay }, 90);
+            if (ShowFixed("Description"))
+                Add("Description",          new Binding("Description")           { Mode = BindingMode.OneWay }, 80);
+            if (ShowFixed("Part Number"))
+                Add("Part Number",          new Binding("PartNumber")            { Mode = BindingMode.OneWay }, 80);
+            if (ShowFixed("Referenced As"))
+                Add("Referenced As",        new Binding("ReferencedAs")          { Mode = BindingMode.OneWay }, 90);
+            if (ShowFixed("Full Path"))
+                Add("Full Path",            new Binding("FullPath")              { Mode = BindingMode.OneWay }, 120, 520);
+            if (ShowFixed("Description Var Used"))
+                Add("Description Var Used", new Binding("DescriptionVarUsed")    { Mode = BindingMode.OneWay }, 80);
+            if (ShowFixed("Description Config Used"))
+                Add("Description Config Used", new Binding("DescriptionConfigUsed") { Mode = BindingMode.OneWay }, 80);
+            if (ShowFixed("Part Number Var Used"))
+                Add("Part Number Var Used", new Binding("PartNumberVarUsed")     { Mode = BindingMode.OneWay }, 80);
+            if (ShowFixed("Part Number Config Used"))
+                Add("Part Number Config Used", new Binding("PartNumberConfigUsed") { Mode = BindingMode.OneWay }, 80);
+
+            // 資料卡變數欄
             foreach (var varName in _activeCardVarNames)
             {
                 var binding = new Binding(".")
                 {
-                    Mode = BindingMode.OneWay,
-                    Converter = _cardVariableConverter,
+                    Mode               = BindingMode.OneWay,
+                    Converter          = _cardVariableConverter,
                     ConverterParameter = varName
                 };
                 Add("Card:" + varName, binding, 72);
@@ -198,9 +234,17 @@ namespace PDMTools
         /// <summary>
         /// 以指定的完整變數清單開啟設定視窗，儲存結果後更新 DataGrid 欄位。
         /// </summary>
-        private async Task OpenColumnSettingsWindowAsync(IReadOnlyList<string> allVars)
+        private async Task OpenColumnSettingsWindowAsync(IReadOnlyList<string> allCardVars)
         {
-            var win = new ColumnSettingsWindow(allVars, _activeCardVarNames) { Owner = this };
+            // 固定欄：尚未設定過時，預設全勾選
+            var currentFixed = _activeFixedColumns ?? AllFixedColumnNames.ToList();
+
+            var win = new ColumnSettingsWindow(
+                AllFixedColumnNames,
+                currentFixed,
+                allCardVars,
+                _activeCardVarNames)
+            { Owner = this };
 
             if (win.ShowDialog() != true)
             {
@@ -210,13 +254,14 @@ namespace PDMTools
                 return;
             }
 
-            _activeCardVarNames = win.SelectedVariables ?? new List<string>();
+            _activeFixedColumns = win.SelectedFixedColumns ?? new List<string>();
+            _activeCardVarNames = win.SelectedVariables    ?? new List<string>();
 
-            // 同時儲存「已勾選」與「已知清單」
             var colSettings = new ColumnSettings
             {
-                SelectedVariables = _activeCardVarNames,
-                KnownVariables    = win.AllShownVariables ?? new List<string>()
+                SelectedVariables  = _activeCardVarNames,
+                SelectedFixedColumns = _activeFixedColumns,
+                KnownVariables     = win.AllShownVariables ?? new List<string>()
             };
             colSettings.Save();
 
@@ -225,9 +270,11 @@ namespace PDMTools
             if (_bomItems.Count > 0)
                 await Dispatcher.InvokeAsync(AutoSizeDataGridColumns, DispatcherPriority.Loaded);
 
+            var cardCnt  = _activeCardVarNames.Count;
+            var fixedCnt = _activeFixedColumns.Count + 1; // +1 for Level
             StatusTextBlock.Text = _bomItems.Count > 0
-                ? $"欄位已更新（{_activeCardVarNames.Count} 個資料卡欄）。請重新抓取以套用至資料。"
-                : $"欄位設定已儲存（{_activeCardVarNames.Count} 個資料卡欄）。";
+                ? $"欄位已更新（固定 {fixedCnt} 欄 + 資料卡 {cardCnt} 欄）。請重新抓取以套用至資料。"
+                : $"欄位設定已儲存（固定 {fixedCnt} 欄 + 資料卡 {cardCnt} 欄）。";
         }
 
         /// <summary>

@@ -15,8 +15,14 @@ namespace PDMTools.Models
         public static readonly string FilePath = Path.Combine(
             AppDomain.CurrentDomain.BaseDirectory, "columns.json");
 
-        /// <summary>使用者勾選的變數（顯示於表格 / Excel）。</summary>
+        /// <summary>使用者勾選的資料卡變數（顯示於表格 / Excel）。</summary>
         public List<string> SelectedVariables { get; set; } = new List<string>();
+
+        /// <summary>
+        /// 使用者勾選要顯示的固定欄位名稱清單。
+        /// null 或空清單表示「尚未設定」，程式應預設全部顯示。
+        /// </summary>
+        public List<string> SelectedFixedColumns { get; set; } = null;
 
         /// <summary>
         /// 上次開啟設定視窗時 Vault 提供的完整變數清單。
@@ -25,6 +31,13 @@ namespace PDMTools.Models
         public List<string> KnownVariables { get; set; } = new List<string>();
 
         public bool IsEmpty => SelectedVariables == null || SelectedVariables.Count == 0;
+
+        /// <summary>
+        /// 固定欄位是否已設定。false 表示尚未設定，應預設全部顯示。
+        /// </summary>
+        public bool HasFixedColumnsSetting =>
+            SelectedFixedColumns != null && SelectedFixedColumns.Count > 0;
+
         public static bool FileExists => File.Exists(FilePath);
 
         // ── 讀 ─────────────────────────────────────────────────────────────
@@ -48,13 +61,15 @@ namespace PDMTools.Models
                     };
                 }
 
-                // 新格式：物件 {"selected":[...],"known":[...]}
-                var selected = ExtractArray(json, "selected") ?? new List<string>();
-                var known    = ExtractArray(json, "known")    ?? new List<string>();
+                // 新格式：物件 {"selected":[...],"known":[...],"fixedColumns":[...]}
+                var selected     = ExtractArray(json, "selected")     ?? new List<string>();
+                var known        = ExtractArray(json, "known")        ?? new List<string>();
+                var fixedColumns = ExtractArray(json, "fixedColumns"); // null = 尚未設定
                 return new ColumnSettings
                 {
-                    SelectedVariables = selected,
-                    KnownVariables    = known
+                    SelectedVariables  = selected,
+                    KnownVariables     = known,
+                    SelectedFixedColumns = fixedColumns   // null 保留，讓程式預設全顯示
                 };
             }
             catch
@@ -73,6 +88,8 @@ namespace PDMTools.Models
                     + BuildJsonStringArray(SelectedVariables)
                     + ",\"known\":"
                     + BuildJsonStringArray(KnownVariables)
+                    + ",\"fixedColumns\":"
+                    + BuildJsonStringArray(SelectedFixedColumns ?? new List<string>())
                     + "}";
                 File.WriteAllText(FilePath, json, Encoding.UTF8);
             }
