@@ -13,7 +13,7 @@ namespace PDMTools
     public partial class MainWindow : Window
     {
         private const string VaultRootPath = @"C:\CP-PDM";
-        private PdmBomExportService? _exportService;
+        private PdmBomExportService _exportService;
         private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
 
         public MainWindow()

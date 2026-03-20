@@ -53,7 +53,7 @@ namespace PDMTools.Services
 
         public async Task<IReadOnlyList<BomItem>> CollectBomAsync(
             string assemblyPath,
-            IProgress<ProgressInfo>? progress,
+            IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken = default)
         {
             return await Task.Run(() =>
@@ -77,9 +77,9 @@ namespace PDMTools.Services
                 progress?.Report(new ProgressInfo(10, "已登入 PDM Vault，開始解析參考樹..."));
 
                 var items = new List<BomItem>();
-                IEdmFolder5? folder = null;
-                IEdmFile5? file = null;
-                IEdmReference5? refTree = null;
+                IEdmFolder5 folder = null;
+                IEdmFile5 file = null;
+                IEdmReference5 refTree = null;
 
                 try
                 {
@@ -121,7 +121,7 @@ namespace PDMTools.Services
         public async Task ExportToExcelAsync(
             IReadOnlyList<BomItem> items,
             string outputPath,
-            IProgress<ProgressInfo>? progress,
+            IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken = default)
         {
             await Task.Run(() =>
@@ -212,7 +212,7 @@ namespace PDMTools.Services
                 throw new InvalidOperationException($"找不到可用的 Vault 名稱，請確認本機視圖路徑是否有效：{VaultRootPath}");
             }
 
-            Exception? lastError = null;
+            Exception lastError = null;
             foreach (var candidate in candidates)
             {
                 try
@@ -263,7 +263,7 @@ namespace PDMTools.Services
                             parameters[0].ParameterType == typeof(string) &&
                             parameters[1].ParameterType == typeof(string).MakeByRefType())
                         {
-                            object?[] args = { localPath, string.Empty };
+                            object[] args = { localPath, string.Empty };
                             m.Invoke(_vault, args);
                             var name = args[1]?.ToString();
                             if (!string.IsNullOrWhiteSpace(name))
@@ -286,7 +286,7 @@ namespace PDMTools.Services
             return string.Empty;
         }
 
-        private static IEdmReference5? GetReferenceTree(IEdmFile5 file, IEdmFolder5 folder)
+        private static IEdmReference5 GetReferenceTree(IEdmFile5 file, IEdmFolder5 folder)
         {
             try
             {
@@ -303,7 +303,7 @@ namespace PDMTools.Services
             string parentLevel,
             ICollection<BomItem> output,
             ISet<string> ancestryPaths,
-            IProgress<ProgressInfo>? progress,
+            IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken)
         {
             var index = 1;
@@ -328,9 +328,9 @@ namespace PDMTools.Services
                     continue;
                 }
 
-                IEdmFolder5? folder = null;
-                IEdmFile5? file = null;
-                IEdmReference5? childTree = null;
+                IEdmFolder5 folder = null;
+                IEdmFile5 file = null;
+                IEdmReference5 childTree = null;
                 try
                 {
                     file = _vault.GetFileFromPath(path, out folder);
@@ -398,7 +398,7 @@ namespace PDMTools.Services
 
             // 某些 interop 版本不提供 CurrentStateID / GetStateFromID，這裡僅使用 CurrentState。
 
-            IEdmEnumeratorVariable10? enumVar = null;
+            IEdmEnumeratorVariable10 enumVar = null;
             try
             {
                 enumVar = file.GetEnumeratorVariable() as IEdmEnumeratorVariable10;
@@ -550,7 +550,7 @@ namespace PDMTools.Services
 
             while (pos != null)
             {
-                IEdmReference5? child;
+                IEdmReference5 child;
                 try
                 {
                     child = parentNode.GetNextChild(pos);

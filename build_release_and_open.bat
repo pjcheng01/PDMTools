@@ -5,7 +5,7 @@ REM Move to script directory (project root)
 cd /d "%~dp0"
 
 set "PROJECT_FILE=%~dp0PDMTools\PDMTools.csproj"
-set "OUTPUT_DIR=%~dp0PDMTools\bin\Release\net8.0-windows"
+set "OUTPUT_DIR=%~dp0PDMTools\bin\Release\net48"
 
 echo [INFO] Building Release...
 

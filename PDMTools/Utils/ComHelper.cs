@@ -5,7 +5,7 @@ namespace PDMTools.Utils
 {
     internal static class ComHelper
     {
-        public static void Release(object? comObject)
+        public static void Release(object comObject)
         {
             if (comObject == null)
             {

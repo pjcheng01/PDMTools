@@ -7,7 +7,7 @@ SolidWorks PDM 組合件 BOM 匯出工具（WPF）：遞迴參考樹、讀取資
 | 分支 | 目標框架 | 說明 |
 |------|-----------|------|
 | **`main`** | .NET 8（`net8.0-windows`） | 目前主力開發與預設發行線。需安裝 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)。 |
-| **`net48`** | .NET Framework 4.8 | 與企業僅允許 4.x 或舊式部署環境對齊的開發線；程式碼將逐步調整為 `net48` 相容。需安裝 **.NET Framework 4.8 Developer Pack** 以建置。 |
+| **`net48`** | .NET Framework 4.8（`net48`） | **本分支專案已設為 `net48`。** 執行環境需已安裝 **.NET Framework 4.8**；建置需 **.NET Framework 4.8 Developer Pack**（或含 4.8 開發工具的 Visual Studio）。 |
 
 切換分支範例：
 
@@ -16,13 +16,19 @@ git checkout main
 git checkout net48
 ```
 
-## 建置（main / .NET 8）
+## 建置（net48 分支）
 
 ```bash
 dotnet build PDMTools\PDMTools.csproj -c Release
 ```
 
-或雙擊專案根目錄的 `build_release_and_open.bat`（會建置 Release 並開啟輸出資料夾）。
+輸出目錄：`PDMTools\bin\Release\net48\`
+
+或雙擊 `build_release_and_open.bat`（一鍵 Release 並開啟上述資料夾）。
+
+## 建置（main 分支 / .NET 8）
+
+若切回 `main`，目標為 `net8.0-windows`，請使用該分支的 `csproj` 與對應 Runtime。
 
 ## net48 分支：建議的 Commit 訊息範本
 
