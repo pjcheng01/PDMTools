@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
@@ -24,16 +25,35 @@ namespace PDMTools
         private readonly ObservableCollection<BomItem> _bomItems = new ObservableCollection<BomItem>();
         private readonly CardVariableLookupConverter _cardVariableConverter = new CardVariableLookupConverter();
 
+        // 目前作用中的資料卡欄位清單（由設定視窗管理）
+        private List<string> _activeCardVarNames = new List<string>();
+
         public MainWindow()
         {
             InitializeComponent();
             ProgressBar.Value = 0;
-            StatusTextBlock.Text = "就緒";
             BomDataGrid.ItemsSource = _bomItems;
+
+            // 載入已存的欄位設定
+            var settings = ColumnSettings.Load();
+            _activeCardVarNames = settings.SelectedVariables ?? new List<string>();
+
+            // 若尚未設定，使用內建清單作為起始預設
+            if (_activeCardVarNames.Count == 0)
+            {
+                _activeCardVarNames = PdmBomExportService.GetOrderedCardVariableLabels().ToList();
+            }
+
             SetupBomDataGridColumns();
+
+            StatusTextBlock.Text = ColumnSettings.FileExists
+                ? $"就緒（已載入欄位設定：{_activeCardVarNames.Count} 個）"
+                : "就緒（使用內建欄位設定，可按「設定欄位...」自訂）";
         }
 
-        /// <summary>建立與 Excel 匯出相同順序的欄位（含各 Card: 變數獨立欄）。</summary>
+        // ── DataGrid 欄位建立 ──────────────────────────────────────────────
+
+        /// <summary>依 _activeCardVarNames 建立 DataGrid 欄位。</summary>
         private void SetupBomDataGridColumns()
         {
             BomDataGrid.Columns.Clear();
@@ -47,47 +67,43 @@ namespace PDMTools
                     MinWidth = minWidth
                 };
                 if (!double.IsPositiveInfinity(maxWidth))
-                {
                     col.MaxWidth = maxWidth;
-                }
-
                 BomDataGrid.Columns.Add(col);
             }
 
-            Add("Level", new Binding("Level") { Mode = BindingMode.OneWay }, 50);
-            Add("File Name", new Binding("FileName") { Mode = BindingMode.OneWay }, 90);
-            Add("State", new Binding("State") { Mode = BindingMode.OneWay }, 70);
-            Add("Workflow State", new Binding("WorkflowState") { Mode = BindingMode.OneWay }, 90);
-            Add("Description", new Binding("Description") { Mode = BindingMode.OneWay }, 80);
-            Add("Part Number", new Binding("PartNumber") { Mode = BindingMode.OneWay }, 80);
-            Add("Referenced As", new Binding("ReferencedAs") { Mode = BindingMode.OneWay }, 90);
-            Add("Full Path", new Binding("FullPath") { Mode = BindingMode.OneWay }, 120, 520);
-            Add("Description Var Used", new Binding("DescriptionVarUsed") { Mode = BindingMode.OneWay }, 80);
-            Add("Description Config Used", new Binding("DescriptionConfigUsed") { Mode = BindingMode.OneWay }, 80);
-            Add("Part Number Var Used", new Binding("PartNumberVarUsed") { Mode = BindingMode.OneWay }, 80);
-            Add("Part Number Config Used", new Binding("PartNumberConfigUsed") { Mode = BindingMode.OneWay }, 80);
+            Add("Level",                  new Binding("Level")              { Mode = BindingMode.OneWay }, 50);
+            Add("File Name",              new Binding("FileName")           { Mode = BindingMode.OneWay }, 90);
+            Add("State",                  new Binding("State")              { Mode = BindingMode.OneWay }, 70);
+            Add("Workflow State",         new Binding("WorkflowState")      { Mode = BindingMode.OneWay }, 90);
+            Add("Description",            new Binding("Description")        { Mode = BindingMode.OneWay }, 80);
+            Add("Part Number",            new Binding("PartNumber")         { Mode = BindingMode.OneWay }, 80);
+            Add("Referenced As",          new Binding("ReferencedAs")       { Mode = BindingMode.OneWay }, 90);
+            Add("Full Path",              new Binding("FullPath")           { Mode = BindingMode.OneWay }, 120, 520);
+            Add("Description Var Used",   new Binding("DescriptionVarUsed") { Mode = BindingMode.OneWay }, 80);
+            Add("Description Config",     new Binding("DescriptionConfigUsed") { Mode = BindingMode.OneWay }, 80);
+            Add("Part Number Var Used",   new Binding("PartNumberVarUsed")  { Mode = BindingMode.OneWay }, 80);
+            Add("Part Number Config",     new Binding("PartNumberConfigUsed") { Mode = BindingMode.OneWay }, 80);
 
-            foreach (var label in PdmBomExportService.GetOrderedCardVariableLabels())
+            foreach (var varName in _activeCardVarNames)
             {
                 var binding = new Binding(".")
                 {
                     Mode = BindingMode.OneWay,
                     Converter = _cardVariableConverter,
-                    ConverterParameter = label
+                    ConverterParameter = varName
                 };
-                Add("Card:" + label, binding, 72);
+                Add("Card:" + varName, binding, 72);
             }
         }
 
-        /// <summary>依儲存格內容自動調整欄寬（與 Excel AdjustToContents 類似）。</summary>
         private void AutoSizeDataGridColumns()
         {
             BomDataGrid.UpdateLayout();
             foreach (var col in BomDataGrid.Columns)
-            {
                 col.Width = new DataGridLength(1, DataGridLengthUnitType.SizeToCells);
-            }
         }
+
+        // ── 按鈕事件 ──────────────────────────────────────────────────────
 
         private void BrowseButton_OnClick(object sender, RoutedEventArgs e)
         {
@@ -143,12 +159,69 @@ namespace PDMTools
             };
 
             if (saveDialog.ShowDialog(this) != true)
-            {
                 return;
-            }
 
             await RunExportExcelOnlyAsync(saveDialog.FileName);
         }
+
+        private async void ColumnSettingsButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            SetUiBusy(true);
+            StatusTextBlock.Text = "正在從 Vault 讀取可用變數清單...";
+            ProgressBar.Value = 0;
+
+            IReadOnlyList<string> allVars = null;
+            try
+            {
+                _exportService = _exportService ?? new PdmBomExportService();
+                allVars = await _exportService.EnumerateVaultVariablesAsync();
+                ProgressBar.Value = 0;
+            }
+            catch (Exception ex)
+            {
+                // 即使讀取失敗，仍用現有清單或內建清單開啟視窗
+                StatusTextBlock.Text = $"無法讀取 Vault 變數（{ex.Message}），改用本機已知清單。";
+                allVars = _activeCardVarNames.Count > 0
+                    ? _activeCardVarNames
+                    : (IReadOnlyList<string>)PdmBomExportService.GetOrderedCardVariableLabels();
+            }
+            finally
+            {
+                SetUiBusy(false);
+            }
+
+            // 開啟設定視窗
+            var win = new ColumnSettingsWindow(allVars, _activeCardVarNames)
+            {
+                Owner = this
+            };
+
+            if (win.ShowDialog() != true)
+            {
+                StatusTextBlock.Text = _bomItems.Count > 0
+                    ? $"已有 {_bomItems.Count} 筆資料，可匯出 xlsx。"
+                    : "就緒";
+                return;
+            }
+
+            // 套用新設定
+            _activeCardVarNames = win.SelectedVariables ?? new List<string>();
+
+            var colSettings = new ColumnSettings { SelectedVariables = _activeCardVarNames };
+            colSettings.Save();
+
+            // 重建 DataGrid 欄位
+            SetupBomDataGridColumns();
+
+            if (_bomItems.Count > 0)
+                await Dispatcher.InvokeAsync(AutoSizeDataGridColumns, DispatcherPriority.Loaded);
+
+            StatusTextBlock.Text = _bomItems.Count > 0
+                ? $"欄位已更新（{_activeCardVarNames.Count} 個資料卡欄）。請重新抓取以套用至資料。"
+                : $"欄位設定已儲存（{_activeCardVarNames.Count} 個資料卡欄）。";
+        }
+
+        // ── 核心流程 ──────────────────────────────────────────────────────
 
         private async Task RunGrabFlowAsync(string assemblyPath)
         {
@@ -168,13 +241,12 @@ namespace PDMTools
 
                 var items = await _exportService.CollectBomAsync(
                     assemblyPath,
+                    _activeCardVarNames,
                     progress,
                     _cancellationTokenSource.Token);
 
                 foreach (var item in items)
-                {
                     _bomItems.Add(item);
-                }
 
                 StatusTextBlock.Text = $"抓取完成，共 {_bomItems.Count} 筆。";
                 ProgressBar.Value = 0;
@@ -212,6 +284,7 @@ namespace PDMTools
 
                 await _exportService.ExportToExcelAsync(
                     _bomItems.ToList(),
+                    _activeCardVarNames,
                     outputPath,
                     progress,
                     _cancellationTokenSource.Token);
@@ -250,7 +323,8 @@ namespace PDMTools
             BrowseButton.IsEnabled = !isBusy;
             StartGrabButton.IsEnabled = !isBusy;
             ExportButton.IsEnabled = !isBusy;
-            Mouse.OverrideCursor = isBusy ? System.Windows.Input.Cursors.Wait : null;
+            ColumnSettingsButton.IsEnabled = !isBusy;
+            Mouse.OverrideCursor = isBusy ? Cursors.Wait : null;
         }
     }
 }

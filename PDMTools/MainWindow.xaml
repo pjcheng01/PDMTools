@@ -56,8 +56,14 @@
               Margin="10,0,0,0"
               Content="匯出 xlsx"
               Click="ExportButton_OnClick" />
+      <Button x:Name="ColumnSettingsButton"
+              Width="120"
+              Height="32"
+              Margin="10,0,0,0"
+              Content="設定欄位..."
+              Click="ColumnSettingsButton_OnClick" />
       <ProgressBar x:Name="ProgressBar"
-                   Width="380"
+                   Width="280"
                    Height="20"
                    Margin="12,6,0,0"
                    Minimum="0"

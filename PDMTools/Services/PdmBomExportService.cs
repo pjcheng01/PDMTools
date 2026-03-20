@@ -58,8 +58,83 @@ namespace PDMTools.Services
             _vault = new EdmVault5();
         }
 
+        // ════════════════════════════════════════════════════════════════════
+        // Vault 變數列舉（動態偵測所有已定義的資料卡變數）
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// 列舉 Vault 中所有已定義的資料卡變數名稱，排序後回傳。
+        /// 若列舉失敗，則回傳內建的 CardVariableSpecs 清單作為備援。
+        /// </summary>
+        public async Task<IReadOnlyList<string>> EnumerateVaultVariablesAsync()
+        {
+            return await Task.Run(() =>
+            {
+                EnsureVaultLogin();
+                return EnumerateVaultVariablesInternal();
+            });
+        }
+
+        /// <summary>同步版本，供已在背景執行緒的呼叫端使用。</summary>
+        private IReadOnlyList<string> EnumerateVaultVariablesInternal()
+        {
+            var names = new List<string>();
+            var vaultType = _vault.GetType();
+
+            // 透過反射嘗試 GetFirstVariablePosition / GetNextVariable
+            var getFirstPos = vaultType.GetMethod("GetFirstVariablePosition",
+                BindingFlags.Instance | BindingFlags.Public);
+            var getNextVar = vaultType.GetMethod("GetNextVariable",
+                BindingFlags.Instance | BindingFlags.Public);
+
+            if (getFirstPos != null && getNextVar != null)
+            {
+                try
+                {
+                    var pos = getFirstPos.Invoke(_vault, null);
+                    while (pos != null)
+                    {
+                        try
+                        {
+                            var isNull = pos.GetType()
+                                .GetProperty("IsNull", BindingFlags.Instance | BindingFlags.Public)
+                                ?.GetValue(pos, null);
+                            if (true.Equals(isNull)) break;
+                        }
+                        catch { }
+
+                        object variable;
+                        try { variable = getNextVar.Invoke(_vault, new[] { pos }); }
+                        catch { break; }
+                        if (variable == null) break;
+
+                        try
+                        {
+                            var name = variable.GetType()
+                                .GetProperty("Name", BindingFlags.Instance | BindingFlags.Public)
+                                ?.GetValue(variable, null) as string;
+                            if (!string.IsNullOrWhiteSpace(name))
+                                names.Add(name);
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+
+            // 備援：回傳內建清單
+            if (names.Count == 0)
+                names.AddRange(CardVariableSpecs.Select(s => s.Label));
+
+            return names
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
         public async Task<IReadOnlyList<BomItem>> CollectBomAsync(
             string assemblyPath,
+            IReadOnlyList<string> cardVarNames,
             IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken = default)
         {
@@ -102,7 +177,7 @@ namespace PDMTools.Services
                         throw new InvalidOperationException("無法取得參考樹，請確認檔案版本或 PDM 權限。");
                     }
 
-                    var rootItem = BuildBomItem("1", file, assemblyPath);
+                    var rootItem = BuildBomItem("1", file, assemblyPath, string.Empty, cardVarNames);
                     items.Add(rootItem);
 
                     TraverseReferenceNodes(
@@ -110,6 +185,7 @@ namespace PDMTools.Services
                         parentLevel: "1",
                         output: items,
                         ancestryPaths: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { assemblyPath },
+                        cardVarNames: cardVarNames,
                         progress: progress,
                         cancellationToken: cancellationToken);
                 }
@@ -127,6 +203,7 @@ namespace PDMTools.Services
 
         public async Task ExportToExcelAsync(
             IReadOnlyList<BomItem> items,
+            IReadOnlyList<string> cardVarNames,
             string outputPath,
             IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken = default)
@@ -155,9 +232,14 @@ namespace PDMTools.Services
                     ws.Cell(1, 10).Value = "Description Config Used";
                     ws.Cell(1, 11).Value = "Part Number Var Used";
                     ws.Cell(1, 12).Value = "Part Number Config Used";
-                    for (var i = 0; i < CardVariableSpecs.Length; i++)
+                    // 動態欄位標題
+                    var exportVarNames = (cardVarNames != null && cardVarNames.Count > 0)
+                        ? cardVarNames
+                        : (IReadOnlyList<string>)CardVariableSpecs.Select(s => s.Label).ToList();
+
+                    for (var i = 0; i < exportVarNames.Count; i++)
                     {
-                        ws.Cell(1, 13 + i).Value = $"Card:{CardVariableSpecs[i].Label}";
+                        ws.Cell(1, 13 + i).Value = $"Card:{exportVarNames[i]}";
                     }
 
                     for (var i = 0; i < items.Count; i++)
@@ -177,9 +259,9 @@ namespace PDMTools.Services
                         ws.Cell(row, 10).Value = item.DescriptionConfigUsed;
                         ws.Cell(row, 11).Value = item.PartNumberVarUsed;
                         ws.Cell(row, 12).Value = item.PartNumberConfigUsed;
-                        for (var cardIndex = 0; cardIndex < CardVariableSpecs.Length; cardIndex++)
+                        for (var cardIndex = 0; cardIndex < exportVarNames.Count; cardIndex++)
                         {
-                            var key = CardVariableSpecs[cardIndex].Label;
+                            var key = exportVarNames[cardIndex];
                             item.CardVariables.TryGetValue(key, out var val);
                             ws.Cell(row, 13 + cardIndex).Value = val ?? string.Empty;
                         }
@@ -310,6 +392,7 @@ namespace PDMTools.Services
             string parentLevel,
             ICollection<BomItem> output,
             ISet<string> ancestryPaths,
+            IReadOnlyList<string> cardVarNames,
             IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken)
         {
@@ -346,7 +429,7 @@ namespace PDMTools.Services
                         continue;
                     }
 
-                    var item = BuildBomItem(currentLevel, file, path, node.ReferencedAs);
+                    var item = BuildBomItem(currentLevel, file, path, node.ReferencedAs, cardVarNames);
                     output.Add(item);
                     progress?.Report(new ProgressInfo(
                         percentage: Math.Min(70, 10 + (output.Count % 60)),
@@ -359,7 +442,7 @@ namespace PDMTools.Services
                         childTree = GetReferenceTree(file, folder);
                         if (childTree != null)
                         {
-                            TraverseReferenceNodes(childTree, currentLevel, output, ancestryPaths, progress, cancellationToken);
+                            TraverseReferenceNodes(childTree, currentLevel, output, ancestryPaths, cardVarNames, progress, cancellationToken);
                         }
                     }
                     finally
@@ -377,7 +460,7 @@ namespace PDMTools.Services
             }
         }
 
-        private BomItem BuildBomItem(string level, IEdmFile5 file, string fullPath, string referencedAs = "")
+        private BomItem BuildBomItem(string level, IEdmFile5 file, string fullPath, string referencedAs = "", IReadOnlyList<string> cardVarNames = null)
         {
             var state = string.Empty;
             var workflowState = string.Empty;
@@ -431,10 +514,22 @@ namespace PDMTools.Services
                         out partNumberVarUsed,
                         out partNumberConfigUsed);
 
-                    foreach (var cardVar in CardVariableSpecs)
+                    // 動態模式：直接用使用者選定的變數名稱；備援：使用內建 CardVariableSpecs。
+                    if (cardVarNames != null && cardVarNames.Count > 0)
                     {
-                        var value = GetVarValue(enumVar, cardVar.VariableNames, configs, out _, out _);
-                        cardVariables[cardVar.Label] = value;
+                        foreach (var varName in cardVarNames)
+                        {
+                            var value = GetVarValue(enumVar, new[] { varName }, configs, out _, out _);
+                            cardVariables[varName] = value;
+                        }
+                    }
+                    else
+                    {
+                        foreach (var cardVar in CardVariableSpecs)
+                        {
+                            var value = GetVarValue(enumVar, cardVar.VariableNames, configs, out _, out _);
+                            cardVariables[cardVar.Label] = value;
+                        }
                     }
                 }
             }
