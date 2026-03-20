@@ -200,8 +200,11 @@ namespace PDMTools
 
         private void OK_Click(object sender, RoutedEventArgs e)
         {
-            OrderedSelectedItems  = _selected.ToList();
-            AllShownAvailableItems = _allAvailable.ToList();
+            OrderedSelectedItems = _selected.ToList();
+
+            // KnownVariables 需要涵蓋「已選 + 可用」全部，才能在下次啟動時正確判斷是否有新增變數
+            AllShownAvailableItems = _selected.Concat(_allAvailable).ToList();
+
             DialogResult = true;
         }
 

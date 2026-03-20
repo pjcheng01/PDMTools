@@ -378,6 +378,7 @@ namespace PDMTools.Services
 
         public async Task ExportToExcelAsync(
             IReadOnlyList<BomItem> items,
+            IReadOnlyList<string> selectedFixedColumns,
             IReadOnlyList<string> cardVarNames,
             string outputPath,
             IProgress<ProgressInfo> progress,
@@ -386,60 +387,63 @@ namespace PDMTools.Services
             await Task.Run(() =>
             {
                 if (items == null || items.Count == 0)
-                {
                     throw new InvalidOperationException("沒有可匯出的資料。");
-                }
 
                 progress?.Report(new ProgressInfo(80, "開始輸出 Excel..."));
+
+                // 固定欄：null = 全部顯示
+                var fixedSet = selectedFixedColumns != null
+                    ? new HashSet<string>(selectedFixedColumns, StringComparer.OrdinalIgnoreCase)
+                    : null;
+                bool ShowFixed(string n) => fixedSet == null || fixedSet.Contains(n);
+
+                // (欄位標題, 取值 Func) 清單，依序建立
+                var columns = new List<(string Header, Func<BomItem, string> Get)>();
+
+                columns.Add(("Level", b => b.Level)); // Level 永遠顯示
+
+                if (ShowFixed("File Name"))               columns.Add(("File Name",               b => b.FileName));
+                if (ShowFixed("State"))                   columns.Add(("State",                   b => b.State));
+                if (ShowFixed("Workflow State"))           columns.Add(("Workflow State",           b => b.WorkflowState));
+                if (ShowFixed("Description"))             columns.Add(("Description",             b => b.Description));
+                if (ShowFixed("Part Number"))             columns.Add(("Part Number",             b => b.PartNumber));
+                if (ShowFixed("Referenced As"))           columns.Add(("Referenced As",           b => b.ReferencedAs));
+                if (ShowFixed("Full Path"))               columns.Add(("Full Path",               b => b.FullPath));
+                if (ShowFixed("Description Var Used"))    columns.Add(("Description Var Used",    b => b.DescriptionVarUsed));
+                if (ShowFixed("Description Config Used")) columns.Add(("Description Config Used", b => b.DescriptionConfigUsed));
+                if (ShowFixed("Part Number Var Used"))    columns.Add(("Part Number Var Used",    b => b.PartNumberVarUsed));
+                if (ShowFixed("Part Number Config Used")) columns.Add(("Part Number Config Used", b => b.PartNumberConfigUsed));
+
+                // 卡片變數欄（備援：內建清單）
+                var exportVarNames = (cardVarNames != null && cardVarNames.Count > 0)
+                    ? cardVarNames
+                    : (IReadOnlyList<string>)CardVariableSpecs.Select(s => s.Label).ToList();
+
+                foreach (var varName in exportVarNames)
+                {
+                    var captured = varName;
+                    columns.Add(($"Card:{captured}", b =>
+                    {
+                        b.CardVariables.TryGetValue(captured, out var v);
+                        return v ?? string.Empty;
+                    }));
+                }
 
                 using (var workbook = new XLWorkbook())
                 {
                     var ws = workbook.Worksheets.Add("BOM");
-                    ws.Cell(1, 1).Value = "Level";
-                    ws.Cell(1, 2).Value = "File Name";
-                    ws.Cell(1, 3).Value = "State";
-                    ws.Cell(1, 4).Value = "Workflow State";
-                    ws.Cell(1, 5).Value = "Description";
-                    ws.Cell(1, 6).Value = "Part Number";
-                    ws.Cell(1, 7).Value = "Referenced As";
-                    ws.Cell(1, 8).Value = "Full Path";
-                    ws.Cell(1, 9).Value = "Description Var Used";
-                    ws.Cell(1, 10).Value = "Description Config Used";
-                    ws.Cell(1, 11).Value = "Part Number Var Used";
-                    ws.Cell(1, 12).Value = "Part Number Config Used";
-                    // 動態欄位標題
-                    var exportVarNames = (cardVarNames != null && cardVarNames.Count > 0)
-                        ? cardVarNames
-                        : (IReadOnlyList<string>)CardVariableSpecs.Select(s => s.Label).ToList();
 
-                    for (var i = 0; i < exportVarNames.Count; i++)
-                    {
-                        ws.Cell(1, 13 + i).Value = $"Card:{exportVarNames[i]}";
-                    }
+                    // 標題列
+                    for (var c = 0; c < columns.Count; c++)
+                        ws.Cell(1, c + 1).Value = columns[c].Header;
 
-                    for (var i = 0; i < items.Count; i++)
+                    // 資料列
+                    for (var r = 0; r < items.Count; r++)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        var row = i + 2;
-                        var item = items[i];
-                        ws.Cell(row, 1).Value = item.Level;
-                        ws.Cell(row, 2).Value = item.FileName;
-                        ws.Cell(row, 3).Value = item.State;
-                        ws.Cell(row, 4).Value = item.WorkflowState;
-                        ws.Cell(row, 5).Value = item.Description;
-                        ws.Cell(row, 6).Value = item.PartNumber;
-                        ws.Cell(row, 7).Value = item.ReferencedAs;
-                        ws.Cell(row, 8).Value = item.FullPath;
-                        ws.Cell(row, 9).Value = item.DescriptionVarUsed;
-                        ws.Cell(row, 10).Value = item.DescriptionConfigUsed;
-                        ws.Cell(row, 11).Value = item.PartNumberVarUsed;
-                        ws.Cell(row, 12).Value = item.PartNumberConfigUsed;
-                        for (var cardIndex = 0; cardIndex < exportVarNames.Count; cardIndex++)
-                        {
-                            var key = exportVarNames[cardIndex];
-                            item.CardVariables.TryGetValue(key, out var val);
-                            ws.Cell(row, 13 + cardIndex).Value = val ?? string.Empty;
-                        }
+                        var item = items[r];
+                        for (var c = 0; c < columns.Count; c++)
+                            ws.Cell(r + 2, c + 1).Value = columns[c].Get(item);
                     }
 
                     ws.Row(1).Style.Font.Bold = true;

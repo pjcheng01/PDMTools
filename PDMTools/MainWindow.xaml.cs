@@ -251,8 +251,10 @@ namespace PDMTools
         private async Task OpenColumnSettingsWindowAsync(IReadOnlyList<string> allCardVars)
         {
             // 合併所有可選欄位：固定欄在前，卡片變數在後
+            // 若卡片變數名稱與固定欄名稱重複（如 "Description"），不重複加入，避免設定視窗出現重複項目
+            var fixedNamesSet = new HashSet<string>(AllFixedColumnNames, StringComparer.OrdinalIgnoreCase);
             var allItems = AllFixedColumnNames.ToList();
-            allItems.AddRange(allCardVars);
+            allItems.AddRange(allCardVars.Where(v => !fixedNamesSet.Contains(v)));
 
             // 合併目前已選欄位（維持順序：固定欄在前，卡片欄在後）
             var currentFixed = _activeFixedColumns ?? AllFixedColumnNames.ToList();
@@ -272,18 +274,18 @@ namespace PDMTools
             }
 
             // 分隔回固定欄位與卡片變數
-            var fixedSet = new HashSet<string>(AllFixedColumnNames, StringComparer.OrdinalIgnoreCase);
             _activeFixedColumns = win.OrderedSelectedItems
-                .Where(x => fixedSet.Contains(x)).ToList();
+                .Where(x => fixedNamesSet.Contains(x)).ToList();
             _activeCardVarNames = win.OrderedSelectedItems
-                .Where(x => !fixedSet.Contains(x)).ToList();
+                .Where(x => !fixedNamesSet.Contains(x)).ToList();
 
             var colSettings = new ColumnSettings
             {
                 SelectedVariables    = _activeCardVarNames,
                 SelectedFixedColumns = _activeFixedColumns,
-                KnownVariables       = win.AllShownAvailableItems
-                    .Where(x => !fixedSet.Contains(x)).ToList()  // 只記卡片變數的 known list
+                // KnownVariables 直接用 Vault 完整列舉清單，確保下次啟動比對時不會誤報
+                // （不依賴 AllShownAvailableItems，避免固定欄名稱與卡片變數名稱重疊時漏記）
+                KnownVariables       = allCardVars.ToList()
             };
             colSettings.Save();
 
@@ -410,6 +412,7 @@ namespace PDMTools
 
                 await _exportService.ExportToExcelAsync(
                     _bomItems.ToList(),
+                    _activeFixedColumns,   // null = 全部固定欄；有值 = 僅匯出使用者選取的
                     _activeCardVarNames,
                     outputPath,
                     progress,
