@@ -20,6 +20,9 @@ namespace PDMTools.Models
         public string PartNumberConfigUsed { get; set; } = string.Empty;
         public Dictionary<string, string> CardVariables { get; set; } = new Dictionary<string, string>();
 
+        /// <summary>此列為工程圖（.SLDDRW），顯示時用不同顏色區隔。</summary>
+        public bool IsDrawing { get; set; }
+
         /// <summary>供預覽用：將非空白卡片變數濃縮為單一字串。</summary>
         public string CardVariablesDisplay
         {

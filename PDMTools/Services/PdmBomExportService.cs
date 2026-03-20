@@ -444,6 +444,10 @@ namespace PDMTools.Services
                         var item = items[r];
                         for (var c = 0; c < columns.Count; c++)
                             ws.Cell(r + 2, c + 1).Value = columns[c].Get(item);
+
+                        // 工程圖列以淡藍色底色區分
+                        if (item.IsDrawing)
+                            ws.Row(r + 2).Style.Fill.BackgroundColor = XLColor.FromHtml("#D6EEFF");
                     }
 
                     ws.Row(1).Style.Font.Bold = true;
@@ -454,6 +458,296 @@ namespace PDMTools.Services
                 progress?.Report(new ProgressInfo(100, $"匯出完成：{outputPath}"));
             }, cancellationToken);
         }
+
+        // ════════════════════════════════════════════════════════════════════
+        // 工程圖搜尋：在每個零組件/組合件之後插入同名 .SLDDRW 列
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// 針對 BOM 中每個 .SLDASM/.SLDPRT，以兩段式搜尋其同名工程圖，
+        /// 並在其後插入工程圖 BomItem。同一工程圖檔若對應多個出現位置，
+        /// 每個位置都會插入一列（Level 格式為「原Level-DRW」）。
+        /// </summary>
+        public async Task<IReadOnlyList<BomItem>> AppendDrawingItemsAsync(
+            IReadOnlyList<BomItem> bomItems,
+            IReadOnlyList<string> cardVarNames,
+            IProgress<ProgressInfo> progress,
+            CancellationToken cancellationToken = default)
+        {
+            return await Task.Run(() =>
+            {
+                EnsureVaultLogin();
+
+                var result  = new List<BomItem>(bomItems.Count * 2);
+                var total   = bomItems.Count;
+
+                // 快取：baseName → 找到的工程圖原型（Level 空白，後續 Clone 時填入）
+                var foundCache    = new Dictionary<string, BomItem>(StringComparer.OrdinalIgnoreCase);
+                var notFoundCache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                for (var i = 0; i < total; i++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var item = bomItems[i];
+                    result.Add(item);
+
+                    if (item.IsDrawing) continue;
+
+                    var ext = Path.GetExtension(item.FileName);
+                    if (!ext.Equals(".sldasm", StringComparison.OrdinalIgnoreCase) &&
+                        !ext.Equals(".sldprt", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var baseName      = Path.GetFileNameWithoutExtension(item.FileName);
+                    var drawingLevel  = item.Level + "-DRW";
+
+                    progress?.Report(new ProgressInfo(
+                        Math.Min(95, 75 + (int)(20.0 * i / total)),
+                        $"搜尋工程圖：{item.FileName}"));
+
+                    if (notFoundCache.Contains(baseName)) continue;
+
+                    BomItem drawingItem;
+                    if (foundCache.TryGetValue(baseName, out var proto))
+                    {
+                        drawingItem = CloneDrawingItem(proto, drawingLevel);
+                    }
+                    else
+                    {
+                        var proto2 = FindDrawingProto(item, baseName + ".SLDDRW", cardVarNames);
+                        if (proto2 != null)
+                        {
+                            foundCache[baseName] = proto2;
+                            drawingItem = CloneDrawingItem(proto2, drawingLevel);
+                        }
+                        else
+                        {
+                            notFoundCache.Add(baseName);
+                            continue;
+                        }
+                    }
+
+                    result.Add(drawingItem);
+                }
+
+                progress?.Report(new ProgressInfo(96, $"工程圖搜尋完成。"));
+                return (IReadOnlyList<BomItem>)result;
+            }, cancellationToken);
+        }
+
+        /// <summary>
+        /// 兩段式搜尋工程圖，回傳不含 Level 的原型 BomItem（Level 為空）。
+        /// Stage 1：同資料夾；Stage 2：IEdmSearch5 全庫搜尋。
+        /// </summary>
+        private BomItem FindDrawingProto(BomItem parentItem, string drawingFileName, IReadOnlyList<string> cardVarNames)
+        {
+            // ── Stage 1：同資料夾 ──────────────────────────────────────────
+            if (!string.IsNullOrWhiteSpace(parentItem.FullPath))
+            {
+                var dir = Path.GetDirectoryName(parentItem.FullPath);
+                if (!string.IsNullOrWhiteSpace(dir))
+                {
+                    var drawingPath = Path.Combine(dir, drawingFileName);
+                    IEdmFolder5 folder = null;
+                    IEdmFile5   file   = null;
+                    try
+                    {
+                        file = _vault.GetFileFromPath(drawingPath, out folder);
+                        if (file != null && folder != null)
+                        {
+                            var proto = BuildBomItem(string.Empty, file, drawingPath, string.Empty, cardVarNames);
+                            proto.IsDrawing = true;
+                            return proto;
+                        }
+                    }
+                    catch { /* 找不到則往 Stage 2 */ }
+                    finally
+                    {
+                        ComHelper.Release(file);
+                        ComHelper.Release(folder);
+                    }
+                }
+            }
+
+            // ── Stage 2：全庫搜尋（IEdmSearch5）──────────────────────────
+            return TryFindDrawingVaultWide(drawingFileName, cardVarNames);
+        }
+
+        /// <summary>
+        /// 使用 IEdmSearch5 在整個 Vault 搜尋指定工程圖檔名。
+        /// 找到後取第一個結果。若搜尋 API 不可用，回傳 null。
+        /// </summary>
+        private BomItem TryFindDrawingVaultWide(string drawingFileName, IReadOnlyList<string> cardVarNames)
+        {
+            object searchRaw = null;
+            IEdmFile5 file = null;
+            IEdmFolder5 folder = null;
+
+            try
+            {
+                // 由於不同 EPDM Interop 版本中搜尋相關 API 名稱/簽名可能不同，
+                // 這裡改用 reflection 嘗試建立「檔案搜尋」utility，並觸發搜尋。
+                var vaultObj = (object)_vault;
+                var vaultType = vaultObj.GetType();
+
+                // 1) 找 CreateUtility(...)（不同版本可能只有具體類別才有）
+                var createUtilMethods = vaultType
+                    .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .Where(m => m.Name.Equals("CreateUtility", StringComparison.OrdinalIgnoreCase))
+                    .Where(m => m.GetParameters().Length == 1)
+                    .ToList();
+
+                if (createUtilMethods.Count == 0) return null;
+
+                // 2) 從 EdmUtility enum 挑一個最像「檔案搜尋」的值
+                var utilFields = typeof(EdmUtility).GetFields(BindingFlags.Public | BindingFlags.Static);
+                var utilField =
+                    utilFields.FirstOrDefault(f =>
+                        f.Name.IndexOf("File", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        f.Name.IndexOf("Search", StringComparison.OrdinalIgnoreCase) >= 0)
+                    ?? utilFields.FirstOrDefault(f =>
+                        f.Name.IndexOf("Search", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                if (utilField == null) return null;
+
+                var utilValue = utilField.GetValue(null);
+
+                // 3) 逐一嘗試呼叫，找到可用的 searchRaw
+                foreach (var m in createUtilMethods)
+                {
+                    try
+                    {
+                        var p0 = m.GetParameters()[0].ParameterType;
+                        var arg = utilValue;
+                        if (utilValue != null && p0 != utilValue.GetType())
+                        {
+                            // 若需要 int/short 等轉型，盡可能轉成功
+                            try { arg = Convert.ChangeType(utilValue, p0); } catch { arg = utilValue; }
+                        }
+
+                        searchRaw = m.Invoke(vaultObj, new object[] { arg });
+                        if (searchRaw != null) break;
+                    }
+                    catch
+                    {
+                        // 嘗試下一個重載
+                    }
+                }
+
+                if (searchRaw == null) return null;
+
+                // 4) 取得 IEdmSearch5（若該版本不支援，就不強行）
+                var search = searchRaw as IEdmSearch5;
+                if (search == null) return null;
+
+                // 檔名條件
+                search.FileName = drawingFileName;
+
+                // 5) 觸發 FindFiles：它在介面裡可能是方法，也可能是屬性（版本差異）
+                try
+                {
+                    var st = searchRaw.GetType();
+                    var mFind = st.GetMethod("FindFiles", BindingFlags.Instance | BindingFlags.Public);
+                    if (mFind != null)
+                    {
+                        mFind.Invoke(search, null);
+                    }
+                    else
+                    {
+                        var pFind = st.GetProperty("FindFiles", BindingFlags.Instance | BindingFlags.Public);
+                        if (pFind != null)
+                        {
+                            // 若是 bool/flag 類型，嘗試寫入 True；否則取值觸發副作用
+                            if (pFind.CanWrite && pFind.PropertyType == typeof(bool))
+                            {
+                                pFind.SetValue(search, true, null);
+                            }
+                            else
+                            {
+                                pFind.GetValue(search, null);
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // 找不到 FindFiles 也直接回傳 null
+                    return null;
+                }
+
+                // 6) 走 GetFirstFilePosition / GetNextFile
+                var searchType = searchRaw.GetType();
+                var mGetFirstFilePos = searchType.GetMethod("GetFirstFilePosition",
+                    BindingFlags.Instance | BindingFlags.Public);
+                var mGetNextFile = searchType.GetMethod("GetNextFile",
+                    BindingFlags.Instance | BindingFlags.Public);
+
+                if (mGetFirstFilePos == null || mGetNextFile == null) return null;
+
+                var posObj = mGetFirstFilePos.Invoke(search, null);
+                var pos = posObj as IEdmPos5;
+                if (pos == null || pos.IsNull) return null;
+
+                var fileObj = mGetNextFile.Invoke(search, new object[] { pos });
+                file = fileObj as IEdmFile5;
+                if (file == null) return null;
+
+                // 7) 取得第一個資料夾以建構本機路徑（避免不同 IEdmFile5 版本差異）
+                var fileType = typeof(IEdmFile5);
+                var mGetFirstFolderPos = fileType.GetMethod("GetFirstFolderPosition",
+                    BindingFlags.Instance | BindingFlags.Public);
+                var mGetNextFolder = fileType.GetMethod("GetNextFolder",
+                    BindingFlags.Instance | BindingFlags.Public);
+
+                if (mGetFirstFolderPos == null || mGetNextFolder == null) return null;
+
+                var folderPosObj = mGetFirstFolderPos.Invoke(file, null);
+                var folderPos = folderPosObj as IEdmPos5;
+                if (folderPos == null || folderPos.IsNull) return null;
+
+                var folderObj = mGetNextFolder.Invoke(file, new object[] { folderPos });
+                folder = folderObj as IEdmFolder5;
+                if (folder == null) return null;
+
+                var localPath = file.GetLocalPath(folder.ID);
+                if (string.IsNullOrWhiteSpace(localPath)) return null;
+
+                var proto = BuildBomItem(string.Empty, file, localPath, string.Empty, cardVarNames);
+                proto.IsDrawing = true;
+                return proto;
+            }
+            catch
+            {
+                return null;
+            }
+            finally
+            {
+                ComHelper.Release(folder);
+                ComHelper.Release(file);
+                ComHelper.Release(searchRaw);
+            }
+        }
+
+        /// <summary>根據原型複製一個工程圖 BomItem，並指定新的 Level。</summary>
+        private static BomItem CloneDrawingItem(BomItem proto, string newLevel) =>
+            new BomItem
+            {
+                IsDrawing             = true,
+                Level                 = newLevel,
+                FileName              = proto.FileName,
+                FullPath              = proto.FullPath,
+                State                 = proto.State,
+                WorkflowState         = proto.WorkflowState,
+                Description           = proto.Description,
+                PartNumber            = proto.PartNumber,
+                ReferencedAs          = proto.ReferencedAs,
+                DescriptionVarUsed    = proto.DescriptionVarUsed,
+                DescriptionConfigUsed = proto.DescriptionConfigUsed,
+                PartNumberVarUsed     = proto.PartNumberVarUsed,
+                PartNumberConfigUsed  = proto.PartNumberConfigUsed,
+                CardVariables         = new Dictionary<string, string>(proto.CardVariables,
+                                            StringComparer.OrdinalIgnoreCase)
+            };
 
         private void EnsureVaultLogin()
         {

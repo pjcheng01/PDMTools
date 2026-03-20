@@ -62,8 +62,15 @@
               Margin="10,0,0,0"
               Content="設定欄位..."
               Click="ColumnSettingsButton_OnClick" />
+      <ToggleButton x:Name="ShowDrawingsToggle"
+                    Width="120"
+                    Height="32"
+                    Margin="10,0,0,0"
+                    Content="顯示工程圖"
+                    IsEnabled="False"
+                    Click="ShowDrawingsToggle_Click" />
       <ProgressBar x:Name="ProgressBar"
-                   Width="280"
+                   Width="220"
                    Height="20"
                    Margin="12,6,0,0"
                    Minimum="0"
@@ -99,6 +106,17 @@
               ScrollViewer.HorizontalScrollBarVisibility="Auto"
               ScrollViewer.VerticalScrollBarVisibility="Auto"
               ScrollViewer.CanContentScroll="True">
+      <!-- 工程圖列（IsDrawing=True）以淡藍色底色顯示 -->
+      <DataGrid.RowStyle>
+        <Style TargetType="DataGridRow">
+          <Style.Triggers>
+            <DataTrigger Binding="{Binding IsDrawing}" Value="True">
+              <Setter Property="Background" Value="#FFD6EEFF" />
+              <Setter Property="Foreground" Value="#FF003070" />
+            </DataTrigger>
+          </Style.Triggers>
+        </Style>
+      </DataGrid.RowStyle>
       <!-- 欄位於程式碼中建立，與 Excel 匯出一致 -->
     </DataGrid>
   </Grid>

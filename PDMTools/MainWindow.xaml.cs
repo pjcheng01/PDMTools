@@ -40,6 +40,12 @@ namespace PDMTools
         // 目前作用中的資料卡欄位清單（由設定視窗管理）
         private List<string> _activeCardVarNames = new List<string>();
 
+        // ── 工程圖列相關狀態 ──────────────────────────────────────────────
+        // 純零組件 BOM（不含工程圖列）；抓取後快取，用於 Toggle OFF 還原
+        private List<BomItem> _rawBomItems = new List<BomItem>();
+        // 含工程圖列的 BOM；Toggle ON 時由 AppendDrawingItemsAsync 建立並快取
+        private List<BomItem> _bomItemsWithDrawings = null;
+
         public MainWindow()
         {
             InitializeComponent();
@@ -201,6 +207,74 @@ namespace PDMTools
                 return;
 
             await RunExportExcelOnlyAsync(saveDialog.FileName);
+        }
+
+        private async void ShowDrawingsToggle_Click(object sender, RoutedEventArgs e)
+        {
+            var isOn = ShowDrawingsToggle.IsChecked == true;
+
+            if (!isOn)
+            {
+                // Toggle OFF：還原純零組件 BOM
+                _bomItems.Clear();
+                foreach (var item in _rawBomItems) _bomItems.Add(item);
+                StatusTextBlock.Text = $"已隱藏工程圖列，共 {_bomItems.Count} 筆。";
+                return;
+            }
+
+            // Toggle ON：若已有快取直接使用，否則背景搜尋
+            if (_bomItemsWithDrawings != null)
+            {
+                _bomItems.Clear();
+                foreach (var item in _bomItemsWithDrawings) _bomItems.Add(item);
+                var drwCount = _bomItemsWithDrawings.Count(x => x.IsDrawing);
+                StatusTextBlock.Text = $"已顯示工程圖列（找到 {drwCount} 個工程圖）。";
+                return;
+            }
+
+            SetUiBusy(true);
+            IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
+            {
+                ProgressBar.Value = Math.Max(0, Math.Min(100, p.Percentage));
+                StatusTextBlock.Text = p.Message;
+            });
+
+            try
+            {
+                _exportService = _exportService ?? new PdmBomExportService();
+                var withDrawings = await _exportService.AppendDrawingItemsAsync(
+                    _rawBomItems,
+                    _activeCardVarNames,
+                    progress,
+                    _cancellationTokenSource.Token);
+
+                _bomItemsWithDrawings = withDrawings.ToList();
+
+                _bomItems.Clear();
+                foreach (var item in _bomItemsWithDrawings) _bomItems.Add(item);
+
+                var drwCount = _bomItemsWithDrawings.Count(x => x.IsDrawing);
+                StatusTextBlock.Text = drwCount > 0
+                    ? $"已顯示工程圖列（找到 {drwCount} 個工程圖，共 {_bomItems.Count} 列）。"
+                    : $"未找到任何工程圖，共 {_bomItems.Count} 筆零組件。";
+                ProgressBar.Value = 0;
+
+                await Dispatcher.InvokeAsync(AutoSizeDataGridColumns, DispatcherPriority.Loaded);
+            }
+            catch (OperationCanceledException)
+            {
+                ShowDrawingsToggle.IsChecked = false;
+                MessageBox.Show(this, "作業已取消。", "取消", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                ShowDrawingsToggle.IsChecked = false;
+                MessageBox.Show(this, ex.Message, "錯誤", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                SetUiBusy(false);
+            }
         }
 
         private async void ColumnSettingsButton_OnClick(object sender, RoutedEventArgs e)
@@ -373,6 +447,12 @@ namespace PDMTools
                     progress,
                     _cancellationTokenSource.Token);
 
+                // 快取純零組件 BOM，重置工程圖快取與 Toggle 狀態
+                _rawBomItems           = items.ToList();
+                _bomItemsWithDrawings  = null;
+                ShowDrawingsToggle.IsChecked = false;
+                ShowDrawingsToggle.IsEnabled = items.Count > 0;
+
                 foreach (var item in items)
                     _bomItems.Add(item);
 
@@ -449,11 +529,13 @@ namespace PDMTools
 
         private void SetUiBusy(bool isBusy)
         {
-            BrowseButton.IsEnabled = !isBusy;
-            StartGrabButton.IsEnabled = !isBusy;
-            ExportButton.IsEnabled = !isBusy;
+            BrowseButton.IsEnabled         = !isBusy;
+            StartGrabButton.IsEnabled      = !isBusy;
+            ExportButton.IsEnabled         = !isBusy;
             ColumnSettingsButton.IsEnabled = !isBusy;
-            Mouse.OverrideCursor = isBusy ? Cursors.Wait : null;
+            // Toggle 只在有資料時才可操作，忙碌中一律禁用
+            ShowDrawingsToggle.IsEnabled   = !isBusy && _rawBomItems.Count > 0;
+            Mouse.OverrideCursor           = isBusy ? Cursors.Wait : null;
         }
     }
 }
