@@ -41,7 +41,7 @@
             Content="瀏覽"
             Click="BrowseButton_OnClick" />
 
-    <StackPanel Grid.Row="2"
+    <WrapPanel Grid.Row="2"
                 Grid.ColumnSpan="2"
                 Margin="0,14,0,0"
                 Orientation="Horizontal">
@@ -62,6 +62,32 @@
               Margin="10,0,0,0"
               Content="設定欄位..."
               Click="ColumnSettingsButton_OnClick" />
+      <ComboBox x:Name="BomLevelDefinitionComboBox"
+                Width="160"
+                Height="32"
+                Margin="10,0,0,0"
+                SelectedIndex="1"
+                VerticalContentAlignment="Center">
+        <ComboBoxItem Content="定義A（含根）" />
+        <ComboBoxItem Content="定義B（不含根）" />
+      </ComboBox>
+
+      <TextBlock Text="最大層數："
+                 Margin="10,0,0,0"
+                 VerticalAlignment="Center"
+                 Foreground="DimGray" />
+      <TextBox x:Name="MaxBomDepthTextBox"
+               Width="60"
+               Height="30"
+               Text="3"
+               Margin="6,0,0,0"
+               VerticalContentAlignment="Center" />
+      <CheckBox x:Name="AllBomDepthCheckBox"
+                 Content="取所有層"
+                 Margin="10,0,0,0"
+                 VerticalAlignment="Center"
+                 IsChecked="False" />
+
       <ToggleButton x:Name="ShowDrawingsToggle"
                     Width="120"
                     Height="32"
@@ -75,7 +101,7 @@
                    Margin="12,6,0,0"
                    Minimum="0"
                    Maximum="100" />
-    </StackPanel>
+    </WrapPanel>
 
     <TextBlock x:Name="StatusTextBlock"
                Grid.Row="3"

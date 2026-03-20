@@ -310,6 +310,8 @@ namespace PDMTools.Services
         public async Task<IReadOnlyList<BomItem>> CollectBomAsync(
             string assemblyPath,
             IReadOnlyList<string> cardVarNames,
+            bool includeRootBomItem,
+            int? maxBomLayerDepth,
             IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken = default)
         {
@@ -352,17 +354,37 @@ namespace PDMTools.Services
                         throw new InvalidOperationException("無法取得參考樹，請確認檔案版本或 PDM 權限。");
                     }
 
-                    var rootItem = BuildBomItem("1", file, assemblyPath, string.Empty, cardVarNames);
-                    items.Add(rootItem);
+                    if (includeRootBomItem)
+                    {
+                        var rootItem = BuildBomItem("1", file, assemblyPath, string.Empty, cardVarNames);
+                        items.Add(rootItem);
 
-                    TraverseReferenceNodes(
-                        parentNode: refTree,
-                        parentLevel: "1",
-                        output: items,
-                        ancestryPaths: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { assemblyPath },
-                        cardVarNames: cardVarNames,
-                        progress: progress,
-                        cancellationToken: cancellationToken);
+                        // root 在 BOM 顯示層 => root 視為 layer 1
+                        TraverseReferenceNodes(
+                            parentNode: refTree,
+                            parentLevelPrefix: "1",
+                            parentLayer: 1,
+                            maxBomLayerDepth: maxBomLayerDepth,
+                            output: items,
+                            ancestryPaths: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { assemblyPath },
+                            cardVarNames: cardVarNames,
+                            progress: progress,
+                            cancellationToken: cancellationToken);
+                    }
+                    else
+                    {
+                        // root 不顯示 => root 視為 layer 0，第一層子件顯示為 layer 1
+                        TraverseReferenceNodes(
+                            parentNode: refTree,
+                            parentLevelPrefix: string.Empty,
+                            parentLayer: 0,
+                            maxBomLayerDepth: maxBomLayerDepth,
+                            output: items,
+                            ancestryPaths: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { assemblyPath },
+                            cardVarNames: cardVarNames,
+                            progress: progress,
+                            cancellationToken: cancellationToken);
+                    }
                 }
                 finally
                 {
@@ -862,19 +884,32 @@ namespace PDMTools.Services
 
         private void TraverseReferenceNodes(
             IEdmReference5 parentNode,
-            string parentLevel,
+            string parentLevelPrefix,
+            int parentLayer,
+            int? maxBomLayerDepth,
             ICollection<BomItem> output,
             ISet<string> ancestryPaths,
             IReadOnlyList<string> cardVarNames,
             IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken)
         {
+            // parentLayer 已達最大層數 => 不再展開其子節點
+            if (maxBomLayerDepth != null && parentLayer >= maxBomLayerDepth.Value)
+                return;
+
             var index = 1;
             foreach (var node in EnumerateChildren(parentNode))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
-                var currentLevel = $"{parentLevel}.{index}";
+                var currentLayer = parentLayer + 1;
+                if (maxBomLayerDepth != null && currentLayer > maxBomLayerDepth.Value)
+                    return;
+
+                // parentLevelPrefix 為空時，第一層以「index」表示（避免多出一層點號）
+                var currentLevel = string.IsNullOrWhiteSpace(parentLevelPrefix)
+                    ? index.ToString()
+                    : $"{parentLevelPrefix}.{index}";
                 index++;
 
                 var path = TryGetPathFromReferenceNode(node);
@@ -915,7 +950,16 @@ namespace PDMTools.Services
                         childTree = GetReferenceTree(file, folder);
                         if (childTree != null)
                         {
-                            TraverseReferenceNodes(childTree, currentLevel, output, ancestryPaths, cardVarNames, progress, cancellationToken);
+                            TraverseReferenceNodes(
+                                childTree,
+                                currentLevel,
+                                currentLayer,
+                                maxBomLayerDepth,
+                                output,
+                                ancestryPaths,
+                                cardVarNames,
+                                progress,
+                                cancellationToken);
                         }
                     }
                     finally

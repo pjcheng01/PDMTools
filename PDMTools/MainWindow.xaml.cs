@@ -180,7 +180,25 @@ namespace PDMTools
                 return;
             }
 
-            await RunGrabFlowAsync(assemblyPath);
+            var includeRootBomItem = BomLevelDefinitionComboBox.SelectedIndex == 0; // A：含根
+
+            int? maxBomLayerDepth = null;
+            if (AllBomDepthCheckBox.IsChecked == true)
+            {
+                maxBomLayerDepth = null; // 取所有層
+            }
+            else
+            {
+                var txt = MaxBomDepthTextBox.Text?.Trim() ?? string.Empty;
+                if (!int.TryParse(txt, out var maxDepth) || maxDepth <= 0)
+                {
+                    MessageBox.Show(this, "請輸入正確的「最大層數」。例如：3", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+                maxBomLayerDepth = maxDepth;
+            }
+
+            await RunGrabFlowAsync(assemblyPath, includeRootBomItem, maxBomLayerDepth);
         }
 
         private async void ExportButton_OnClick(object sender, RoutedEventArgs e)
@@ -425,7 +443,7 @@ namespace PDMTools
 
         // ── 核心流程 ──────────────────────────────────────────────────────
 
-        private async Task RunGrabFlowAsync(string assemblyPath)
+        private async Task RunGrabFlowAsync(string assemblyPath, bool includeRootBomItem, int? maxBomLayerDepth)
         {
             SetUiBusy(true);
 
@@ -444,6 +462,8 @@ namespace PDMTools
                 var items = await _exportService.CollectBomAsync(
                     assemblyPath,
                     _activeCardVarNames,
+                    includeRootBomItem,
+                    maxBomLayerDepth,
                     progress,
                     _cancellationTokenSource.Token);
 
