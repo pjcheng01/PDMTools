@@ -1,14 +1,19 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Data;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using PDMTools.Converters;
@@ -24,6 +29,13 @@ namespace PDMTools
         private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
         private readonly ObservableCollection<BomItem> _bomItems = new ObservableCollection<BomItem>();
         private readonly CardVariableLookupConverter _cardVariableConverter = new CardVariableLookupConverter();
+        private readonly Dictionary<string, ColumnFilterState> _columnFilters =
+            new Dictionary<string, ColumnFilterState>(StringComparer.OrdinalIgnoreCase);
+        private ICollectionView _bomItemsView;
+        private bool _suppressAssemblyPathTextChanged;
+        private Popup _inlineTextSelectionPopup;
+        private TextBox _inlineTextSelectionTextBox;
+        private DataGridCell _inlineTextSelectionCell;
 
         // ── 固定欄位定義（Level 不在此列，永遠顯示）──────────────────────
         private static readonly IReadOnlyList<string> AllFixedColumnNames = new List<string>
@@ -50,7 +62,10 @@ namespace PDMTools
         {
             InitializeComponent();
             SetProgressPercent(0);
-            BomDataGrid.ItemsSource = _bomItems;
+            _bomItemsView = CollectionViewSource.GetDefaultView(_bomItems);
+            _bomItemsView.Filter = FilterBomItem;
+            _bomItems.CollectionChanged += BomItems_CollectionChanged;
+            BomDataGrid.ItemsSource = _bomItemsView;
 
             // 載入已存的欄位設定
             var settings = ColumnSettings.Load();
@@ -72,9 +87,39 @@ namespace PDMTools
             StatusTextBlock.Text = ColumnSettings.FileExists
                 ? $"就緒（已載入欄位設定：{_activeCardVarNames.Count} 個）"
                 : "就緒（使用內建欄位設定，可按「設定欄位...」自訂）";
+            SetAssemblyPathPendingVisual(false);
 
-            // 視窗完全載入後，背景偵測 Vault 是否有新變數
-            Loaded += async (s, e) => await CheckForNewVaultVariablesAsync();
+            // 視窗完全載入後，延後執行背景偵測，避免影響啟動體感
+            Loaded += MainWindow_OnLoaded;
+        }
+        private async void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
+        {
+            // 先讓視窗完成第一輪繪製，避免啟動畫面卡頓
+            await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
+            await Task.Delay(800);
+            await CheckForNewVaultVariablesAsync();
+        }
+
+
+        private sealed class ColumnHeaderInfo : INotifyPropertyChanged
+        {
+            private bool _isFiltered;
+
+            public string Key { get; set; } = string.Empty;
+            public string Title { get; set; } = string.Empty;
+
+            public bool IsFiltered
+            {
+                get => _isFiltered;
+                set
+                {
+                    if (_isFiltered == value) return;
+                    _isFiltered = value;
+                    PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsFiltered)));
+                }
+            }
+
+            public event PropertyChangedEventHandler PropertyChanged;
         }
 
         // ── DataGrid 欄位建立 ──────────────────────────────────────────────
@@ -83,25 +128,44 @@ namespace PDMTools
         private void SetupBomDataGridColumns()
         {
             BomDataGrid.Columns.Clear();
+            _columnFilters.Clear();
 
-            void Add(string header, Binding binding, double minWidth = 60, double maxWidth = double.PositiveInfinity)
+            void Add(
+                string key,
+                string header,
+                Binding binding,
+                Func<BomItem, string> valueGetter,
+                double minWidth = 60,
+                double maxWidth = double.PositiveInfinity)
             {
+                var headerInfo = new ColumnHeaderInfo
+                {
+                    Key = key,
+                    Title = header
+                };
+
                 var col = new DataGridTextColumn
                 {
-                    Header   = header,
+                    Header = headerInfo,
                     Binding  = binding,
                     MinWidth = minWidth
                 };
                 if (!double.IsPositiveInfinity(maxWidth))
                     col.MaxWidth = maxWidth;
                 BomDataGrid.Columns.Add(col);
+
+                _columnFilters[key] = new ColumnFilterState
+                {
+                    Key = key,
+                    ValueGetter = valueGetter
+                };
             }
 
             // Level 永遠顯示
-            Add("Level", new Binding("Level") { Mode = BindingMode.OneWay }, 50);
+            Add("Level", "Level", new Binding("Level") { Mode = BindingMode.OneWay }, i => i.Level, 50);
 
             // 用量統計：在父階底下，相同檔案路徑出現幾次
-            Add("Use Count", new Binding("UsageCount") { Mode = BindingMode.OneWay }, 80);
+            Add("Use Count", "Use Count", new Binding("UsageCount") { Mode = BindingMode.OneWay }, i => i.UsageCount?.ToString() ?? string.Empty, 80);
 
             // 固定欄：依選擇決定是否加入（null = 全顯示）
             var fixedSet = _activeFixedColumns != null
@@ -111,27 +175,27 @@ namespace PDMTools
             bool ShowFixed(string name) => fixedSet == null || fixedSet.Contains(name);
 
             if (ShowFixed("File Name"))
-                Add("File Name",            new Binding("FileName")              { Mode = BindingMode.OneWay }, 90);
+                Add("File Name", "File Name", new Binding("FileName") { Mode = BindingMode.OneWay }, i => i.FileName, 90);
             if (ShowFixed("State"))
-                Add("State",                new Binding("State")                 { Mode = BindingMode.OneWay }, 70);
+                Add("State", "State", new Binding("State") { Mode = BindingMode.OneWay }, i => i.State, 70);
             if (ShowFixed("Workflow State"))
-                Add("Workflow State",       new Binding("WorkflowState")         { Mode = BindingMode.OneWay }, 90);
+                Add("Workflow State", "Workflow State", new Binding("WorkflowState") { Mode = BindingMode.OneWay }, i => i.WorkflowState, 90);
             if (ShowFixed("Description"))
-                Add("Description",          new Binding("Description")           { Mode = BindingMode.OneWay }, 80);
+                Add("Description", "Description", new Binding("Description") { Mode = BindingMode.OneWay }, i => i.Description, 80);
             if (ShowFixed("Part Number"))
-                Add("Part Number",          new Binding("PartNumber")            { Mode = BindingMode.OneWay }, 80);
+                Add("Part Number", "Part Number", new Binding("PartNumber") { Mode = BindingMode.OneWay }, i => i.PartNumber, 80);
             if (ShowFixed("Referenced As"))
-                Add("Referenced As",        new Binding("ReferencedAs")          { Mode = BindingMode.OneWay }, 90);
+                Add("Referenced As", "Referenced As", new Binding("ReferencedAs") { Mode = BindingMode.OneWay }, i => i.ReferencedAs, 90);
             if (ShowFixed("Full Path"))
-                Add("Full Path",            new Binding("FullPath")              { Mode = BindingMode.OneWay }, 120, 520);
+                Add("Full Path", "Full Path", new Binding("FullPath") { Mode = BindingMode.OneWay }, i => i.FullPath, 120, 520);
             if (ShowFixed("Description Var Used"))
-                Add("Description Var Used", new Binding("DescriptionVarUsed")    { Mode = BindingMode.OneWay }, 80);
+                Add("Description Var Used", "Description Var Used", new Binding("DescriptionVarUsed") { Mode = BindingMode.OneWay }, i => i.DescriptionVarUsed, 80);
             if (ShowFixed("Description Config Used"))
-                Add("Description Config Used", new Binding("DescriptionConfigUsed") { Mode = BindingMode.OneWay }, 80);
+                Add("Description Config Used", "Description Config Used", new Binding("DescriptionConfigUsed") { Mode = BindingMode.OneWay }, i => i.DescriptionConfigUsed, 80);
             if (ShowFixed("Part Number Var Used"))
-                Add("Part Number Var Used", new Binding("PartNumberVarUsed")     { Mode = BindingMode.OneWay }, 80);
+                Add("Part Number Var Used", "Part Number Var Used", new Binding("PartNumberVarUsed") { Mode = BindingMode.OneWay }, i => i.PartNumberVarUsed, 80);
             if (ShowFixed("Part Number Config Used"))
-                Add("Part Number Config Used", new Binding("PartNumberConfigUsed") { Mode = BindingMode.OneWay }, 80);
+                Add("Part Number Config Used", "Part Number Config Used", new Binding("PartNumberConfigUsed") { Mode = BindingMode.OneWay }, i => i.PartNumberConfigUsed, 80);
 
             // 資料卡變數欄
             foreach (var varName in _activeCardVarNames)
@@ -142,21 +206,138 @@ namespace PDMTools
                     Converter          = _cardVariableConverter,
                     ConverterParameter = varName
                 };
-                Add("Card:" + varName, binding, 72);
+                var cardVarKey = "Card:" + varName;
+                Add(cardVarKey, cardVarKey, binding, i =>
+                {
+                    if (i.CardVariables == null) return string.Empty;
+                    return i.CardVariables.TryGetValue(varName, out var value) ? value : string.Empty;
+                }, 72);
             }
+
+            RebuildAllFilterValueOptions();
+            UpdateFilterUiState();
+            _bomItemsView?.Refresh();
         }
 
         private void AutoSizeDataGridColumns()
         {
             BomDataGrid.UpdateLayout();
+            var cellWidths = new Dictionary<DataGridColumn, double>();
             foreach (var col in BomDataGrid.Columns)
+            {
                 col.Width = new DataGridLength(1, DataGridLengthUnitType.SizeToCells);
+            }
+
+            BomDataGrid.UpdateLayout();
+            foreach (var col in BomDataGrid.Columns)
+            {
+                cellWidths[col] = col.ActualWidth;
+                col.Width = new DataGridLength(1, DataGridLengthUnitType.SizeToHeader);
+            }
+
+            BomDataGrid.UpdateLayout();
+            foreach (var col in BomDataGrid.Columns)
+            {
+                var finalWidth = Math.Max(cellWidths.TryGetValue(col, out var cellWidth) ? cellWidth : 0, col.ActualWidth);
+                col.Width = new DataGridLength(finalWidth + 4);
+            }
         }
 
         // ── 按鈕事件 ──────────────────────────────────────────────────────
 
+        private void ColumnFilterButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (!(sender is Button button) || !(button.Tag is string key) || string.IsNullOrWhiteSpace(key))
+                return;
+            if (!_columnFilters.TryGetValue(key, out var state))
+                return;
+
+            EnsureSelectionInitialized(state);
+            RebuildFilterValueOptions(state);
+
+            var menu = BuildFilterContextMenu(state);
+            button.ContextMenu = menu;
+            menu.PlacementTarget = button;
+            menu.Placement = PlacementMode.Bottom;
+            menu.IsOpen = true;
+            e.Handled = true;
+        }
+
+        private void ClearFiltersButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            foreach (var state in _columnFilters.Values)
+            {
+                state.SelectedValues.Clear();
+            }
+
+            _bomItemsView?.Refresh();
+            UpdateFilterUiState();
+            StatusTextBlock.Text = _bomItems.Count > 0
+                ? $"已清除篩選，顯示 {_bomItems.Count} / {_bomItems.Count} 筆。"
+                : "已清除篩選。";
+        }
+
+        private void BomDataGrid_OnPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            var original = e.OriginalSource as DependencyObject;
+            var cell = FindVisualParent<DataGridCell>(original);
+            if (cell == null)
+                return;
+
+            if (!cell.IsFocused)
+                cell.Focus();
+
+            var row = FindVisualParent<DataGridRow>(cell);
+            if (row?.Item != null)
+            {
+                BomDataGrid.SelectedItem = row.Item; // 保留列選取行為
+            }
+
+            BomDataGrid.CurrentCell = new DataGridCellInfo(cell.DataContext, cell.Column);
+        }
+
+        private void CopyCurrentCellMenuItem_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (!TryGetCurrentCellText(out var cellText, out _))
+            {
+                MessageBox.Show(this, "請先在表格中選取一個儲存格。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            Clipboard.SetText(cellText ?? string.Empty);
+            StatusTextBlock.Text = "已複製儲存格內容。";
+        }
+
+        private void OpenTextSelectionModeMenuItem_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (!TryGetCurrentCellText(out var cellText, out var cell))
+            {
+                MessageBox.Show(this, "請先在表格中選取一個儲存格。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            OpenTextSelectionMode(cellText ?? string.Empty, cell);
+        }
+
         private async void BrowseButton_OnClick(object sender, RoutedEventArgs e)
         {
+            var candidatePath = (AssemblyPathTextBox.Text ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(candidatePath))
+            {
+                if (!TryValidateImportPath(candidatePath, out var normalizedPath, out var errorMessage))
+                {
+                    MessageBox.Show(this, errorMessage, "路徑無效", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                SetAssemblyPathText(normalizedPath, isImported: true);
+                StatusTextBlock.Text = "已導入組合件。";
+                _bomItems.Clear();
+                ClearAllFiltersSilently();
+                await PopulateConfigurationComboForPathAsync(normalizedPath);
+                return;
+            }
+
             var dialog = new OpenFileDialog
             {
                 Title = "選擇 SolidWorks 組合件",
@@ -173,9 +354,10 @@ namespace PDMTools
                 return;
             }
 
-            AssemblyPathTextBox.Text = dialog.FileName;
+            SetAssemblyPathText(dialog.FileName, isImported: true);
             StatusTextBlock.Text = "已選擇組合件。";
             _bomItems.Clear();
+            ClearAllFiltersSilently();
 
             await PopulateConfigurationComboForPathAsync(dialog.FileName);
         }
@@ -211,7 +393,7 @@ namespace PDMTools
             {
                 MessageBox.Show(
                     this,
-                    "請先以「瀏覽」選擇組合件，並等待組態清單載入完成後，再從「組態」下拉選單選取組態。",
+                    "請先以「導入文件」選擇或貼上組合件路徑，並等待組態清單載入完成後，再從「組態」下拉選單選取組態。",
                     "提醒",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);
@@ -263,7 +445,10 @@ namespace PDMTools
                 // Toggle OFF：還原純零組件 BOM
                 _bomItems.Clear();
                 foreach (var item in _rawBomItems) _bomItems.Add(item);
-                StatusTextBlock.Text = $"已隱藏工程圖列，共 {_bomItems.Count} 筆。";
+                RebuildAllFilterValueOptions();
+                _bomItemsView?.Refresh();
+                UpdateFilterUiState();
+                StatusTextBlock.Text = $"已隱藏工程圖列，共 {GetFilteredCount()} / {_bomItems.Count} 筆。";
                 return;
             }
 
@@ -273,7 +458,10 @@ namespace PDMTools
                 _bomItems.Clear();
                 foreach (var item in _bomItemsWithDrawings) _bomItems.Add(item);
                 var drwCount = _bomItemsWithDrawings.Count(x => x.IsDrawing);
-                StatusTextBlock.Text = $"已顯示工程圖列（找到 {drwCount} 個工程圖）。";
+                RebuildAllFilterValueOptions();
+                _bomItemsView?.Refresh();
+                UpdateFilterUiState();
+                StatusTextBlock.Text = $"已顯示工程圖列（找到 {drwCount} 個工程圖，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆）。";
                 return;
             }
 
@@ -298,11 +486,14 @@ namespace PDMTools
 
                 _bomItems.Clear();
                 foreach (var item in _bomItemsWithDrawings) _bomItems.Add(item);
+                RebuildAllFilterValueOptions();
+                _bomItemsView?.Refresh();
+                UpdateFilterUiState();
 
                 var drwCount = _bomItemsWithDrawings.Count(x => x.IsDrawing);
                 StatusTextBlock.Text = drwCount > 0
-                    ? $"已顯示工程圖列（找到 {drwCount} 個工程圖，共 {_bomItems.Count} 列）。"
-                    : $"未找到任何工程圖，共 {_bomItems.Count} 筆零組件。";
+                    ? $"已顯示工程圖列（找到 {drwCount} 個工程圖，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆）。"
+                    : $"未找到任何工程圖，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆。";
                 SetProgressPercent(0);
 
                 await Dispatcher.InvokeAsync(AutoSizeDataGridColumns, DispatcherPriority.Loaded);
@@ -436,8 +627,14 @@ namespace PDMTools
             try
             {
                 _exportService = _exportService ?? new PdmBomExportService();
-                vaultVars = await _exportService.EnumerateVaultVariablesAsync(
+                var enumTask = _exportService.EnumerateVaultVariablesAsync(
                     AssemblyPathTextBox.Text?.Trim());
+                var completed = await Task.WhenAny(enumTask, Task.Delay(5000));
+                if (completed != enumTask)
+                {
+                    return; // 啟動時若 Vault 回應過慢，直接略過本次偵測
+                }
+                vaultVars = await enumTask;
             }
             catch
             {
@@ -639,6 +836,7 @@ namespace PDMTools
                 _exportService = _exportService ?? new PdmBomExportService();
                 progress.Report(new ProgressInfo(0, "開始抓取 BOM 與資料卡…"));
                 _bomItems.Clear();
+                ClearAllFiltersSilently();
 
                 var items = await _exportService.CollectBomAsync(
                     assemblyPath,
@@ -658,15 +856,20 @@ namespace PDMTools
                 foreach (var item in items)
                     _bomItems.Add(item);
 
+                RebuildAllFilterValueOptions();
+                _bomItemsView?.Refresh();
+                UpdateFilterUiState();
+
                 var cfg = _exportService.LastConfigurationResolved;
                 var layout = _exportService.LastBomLayoutNameUsed;
                 StatusTextBlock.Text =
                     string.IsNullOrWhiteSpace(cfg) && string.IsNullOrWhiteSpace(layout)
-                        ? $"抓取完成，共 {_bomItems.Count} 筆。"
-                        : $"抓取完成，共 {_bomItems.Count} 筆。（組態：{cfg}；BOM 版面：{layout}）";
+                        ? $"抓取完成，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆。"
+                        : $"抓取完成，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆。（組態：{cfg}；BOM 版面：{layout}）";
                 SetProgressPercent(0);
 
                 await Dispatcher.InvokeAsync(new Action(AutoSizeDataGridColumns), DispatcherPriority.Loaded);
+                await Dispatcher.InvokeAsync(new Action(AutoSizeDataGridColumns), DispatcherPriority.ContextIdle);
             }
             catch (OperationCanceledException)
             {
@@ -741,6 +944,7 @@ namespace PDMTools
             StartGrabButton.IsEnabled      = !isBusy;
             ExportButton.IsEnabled         = !isBusy;
             ColumnSettingsButton.IsEnabled = !isBusy;
+            ClearFiltersButton.IsEnabled   = !isBusy && HasActiveFilters();
             // Toggle 只在有資料時才可操作，忙碌中一律禁用
             ShowDrawingsToggle.IsEnabled   = !isBusy && _rawBomItems.Count > 0;
             Mouse.OverrideCursor           = isBusy ? Cursors.Wait : null;
@@ -752,6 +956,543 @@ namespace PDMTools
             var v = Math.Max(0, Math.Min(100, value));
             ProgressBar.Value = v;
             ProgressPercentTextBlock.Text = $"{(int)Math.Round(v, MidpointRounding.AwayFromZero)}%";
+        }
+
+        private void AssemblyPathTextBox_OnTextChanged(object sender, TextChangedEventArgs e)
+        {
+            if (_suppressAssemblyPathTextChanged)
+                return;
+
+            SetAssemblyPathPendingVisual(!string.IsNullOrWhiteSpace(AssemblyPathTextBox.Text));
+        }
+
+        private void SetAssemblyPathText(string path, bool isImported)
+        {
+            _suppressAssemblyPathTextChanged = true;
+            try
+            {
+                AssemblyPathTextBox.Text = path ?? string.Empty;
+            }
+            finally
+            {
+                _suppressAssemblyPathTextChanged = false;
+            }
+
+            SetAssemblyPathPendingVisual(!isImported && !string.IsNullOrWhiteSpace(path));
+        }
+
+        private void SetAssemblyPathPendingVisual(bool isPending)
+        {
+            AssemblyPathTextBox.Foreground = isPending ? System.Windows.Media.Brushes.Gray : System.Windows.Media.Brushes.Black;
+        }
+
+        private static bool TryValidateImportPath(string inputPath, out string normalizedPath, out string errorMessage)
+        {
+            normalizedPath = string.Empty;
+            errorMessage = string.Empty;
+
+            if (string.IsNullOrWhiteSpace(inputPath))
+            {
+                errorMessage = "請先輸入或貼上組合件路徑。";
+                return false;
+            }
+
+            var trimmed = inputPath.Trim().Trim('"');
+            try
+            {
+                normalizedPath = Path.GetFullPath(trimmed);
+            }
+            catch
+            {
+                errorMessage = "路徑格式不正確，請確認後再試。";
+                return false;
+            }
+
+            if (!string.Equals(Path.GetExtension(normalizedPath), ".sldasm", StringComparison.OrdinalIgnoreCase))
+            {
+                errorMessage = "僅支援導入 .sldasm 組合件檔案。";
+                return false;
+            }
+
+            if (!File.Exists(normalizedPath))
+            {
+                errorMessage = "找不到指定檔案，請確認路徑是否正確。";
+                return false;
+            }
+
+            var fullVaultRoot = Path.GetFullPath(VaultRootPath)
+                .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            var rootWithSep = fullVaultRoot + Path.DirectorySeparatorChar;
+            if (!normalizedPath.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase))
+            {
+                errorMessage = $"檔案必須位於 Vault 路徑內：{VaultRootPath}";
+                return false;
+            }
+
+            return true;
+        }
+
+        private void BomItems_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        {
+            RebuildAllFilterValueOptions();
+            _bomItemsView?.Refresh();
+            UpdateFilterUiState();
+        }
+
+        private bool FilterBomItem(object obj)
+        {
+            if (!(obj is BomItem item))
+                return false;
+
+            foreach (var state in _columnFilters.Values)
+            {
+                if (state.AvailableValues.Count == 0)
+                    continue;
+
+                var selectedCount = state.SelectedValues.Count;
+                if (selectedCount == 0 || selectedCount == state.AvailableValues.Count)
+                    continue;
+
+                var currentValue = NormalizeFilterValue(state.ValueGetter(item));
+                if (!state.SelectedValues.Contains(currentValue))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool TryGetCurrentCellText(out string cellText, out DataGridCell cell)
+        {
+            cellText = string.Empty;
+            cell = null;
+            var currentCell = BomDataGrid.CurrentCell;
+            if (currentCell.Item == null || currentCell.Column == null)
+                return false;
+            if (!(currentCell.Item is BomItem bomItem))
+                return false;
+            if (!(currentCell.Column.Header is ColumnHeaderInfo header))
+                return false;
+            if (!_columnFilters.TryGetValue(header.Key, out var filterState))
+                return false;
+
+            cellText = filterState.ValueGetter(bomItem) ?? string.Empty;
+            cell = GetCellFromCurrentCellInfo(currentCell);
+            return true;
+        }
+
+        private void OpenTextSelectionMode(string fullText, DataGridCell targetCell)
+        {
+            if (targetCell == null)
+            {
+                MessageBox.Show(this, "目前儲存格不可用，請再點選一次後重試。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            CloseInlineTextSelectionMode();
+
+            _inlineTextSelectionTextBox = new TextBox
+            {
+                Text = fullText ?? string.Empty,
+                IsReadOnly = true,
+                AcceptsReturn = false,
+                BorderThickness = new Thickness(0),
+                Background = Brushes.White,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Padding = new Thickness(3, 1, 3, 1),
+                MinWidth = Math.Max(120, targetCell.ActualWidth - 6),
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto
+            };
+
+            var hostBorder = new Border
+            {
+                Background = Brushes.White,
+                BorderBrush = new SolidColorBrush(Color.FromRgb(33, 150, 243)),
+                BorderThickness = new Thickness(1),
+                Child = _inlineTextSelectionTextBox
+            };
+
+            _inlineTextSelectionPopup = new Popup
+            {
+                PlacementTarget = targetCell,
+                Placement = PlacementMode.Center,
+                StaysOpen = false,
+                AllowsTransparency = true,
+                Child = hostBorder
+            };
+            _inlineTextSelectionCell = targetCell;
+
+            _inlineTextSelectionTextBox.PreviewKeyDown += (_, e) =>
+            {
+                if (e.Key == Key.Escape)
+                {
+                    CloseInlineTextSelectionMode();
+                    e.Handled = true;
+                }
+            };
+            _inlineTextSelectionPopup.Closed += (_, __) =>
+            {
+                CloseInlineTextSelectionMode();
+            };
+
+            _inlineTextSelectionPopup.IsOpen = true;
+            _inlineTextSelectionTextBox.Focus();
+            _inlineTextSelectionTextBox.SelectAll();
+        }
+
+        private void CloseInlineTextSelectionMode()
+        {
+            if (_inlineTextSelectionPopup != null)
+            {
+                var popup = _inlineTextSelectionPopup;
+                _inlineTextSelectionPopup = null;
+                popup.IsOpen = false;
+            }
+
+            _inlineTextSelectionTextBox = null;
+
+            if (_inlineTextSelectionCell != null)
+            {
+                _inlineTextSelectionCell.Focus();
+                _inlineTextSelectionCell = null;
+            }
+        }
+
+        private DataGridCell GetCellFromCurrentCellInfo(DataGridCellInfo currentCell)
+        {
+            if (currentCell.Item == null || currentCell.Column == null)
+                return null;
+
+            var rowContainer = BomDataGrid.ItemContainerGenerator.ContainerFromItem(currentCell.Item) as DataGridRow;
+            if (rowContainer == null)
+            {
+                BomDataGrid.ScrollIntoView(currentCell.Item);
+                BomDataGrid.UpdateLayout();
+                rowContainer = BomDataGrid.ItemContainerGenerator.ContainerFromItem(currentCell.Item) as DataGridRow;
+                if (rowContainer == null)
+                    return null;
+            }
+
+            var presenter = FindVisualChild<DataGridCellsPresenter>(rowContainer);
+            if (presenter == null)
+            {
+                rowContainer.ApplyTemplate();
+                presenter = FindVisualChild<DataGridCellsPresenter>(rowContainer);
+            }
+            if (presenter == null)
+                return null;
+
+            var columnIndex = currentCell.Column.DisplayIndex;
+            var cell = presenter.ItemContainerGenerator.ContainerFromIndex(columnIndex) as DataGridCell;
+            if (cell == null)
+            {
+                BomDataGrid.ScrollIntoView(currentCell.Item, currentCell.Column);
+                BomDataGrid.UpdateLayout();
+                cell = presenter.ItemContainerGenerator.ContainerFromIndex(columnIndex) as DataGridCell;
+            }
+
+            return cell;
+        }
+
+        private static T FindVisualParent<T>(DependencyObject child) where T : DependencyObject
+        {
+            var current = child;
+            while (current != null)
+            {
+                if (current is T hit)
+                    return hit;
+                current = VisualTreeHelper.GetParent(current);
+            }
+
+            return null;
+        }
+
+        private static T FindVisualChild<T>(DependencyObject parent) where T : DependencyObject
+        {
+            if (parent == null)
+                return null;
+
+            var childCount = VisualTreeHelper.GetChildrenCount(parent);
+            for (var i = 0; i < childCount; i++)
+            {
+                var child = VisualTreeHelper.GetChild(parent, i);
+                if (child is T hit)
+                    return hit;
+
+                var descendant = FindVisualChild<T>(child);
+                if (descendant != null)
+                    return descendant;
+            }
+
+            return null;
+        }
+
+        private ContextMenu BuildFilterContextMenu(ColumnFilterState state)
+        {
+            var menu = new ContextMenu();
+            var valueMenuItems = new List<(string Value, MenuItem Item)>();
+            TextBox searchBox = null;
+
+            void RefocusSearchBox()
+            {
+                if (searchBox == null) return;
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    searchBox.Focus();
+                    searchBox.Select(searchBox.Text.Length, 0);
+                }), DispatcherPriority.Background);
+            }
+
+            var selectAll = new MenuItem
+            {
+                Header = "全選",
+                StaysOpenOnClick = true
+            };
+            selectAll.Click += (_, __) =>
+            {
+                state.SelectedValues = new HashSet<string>(state.AvailableValues, StringComparer.Ordinal);
+                foreach (var (_, item) in valueMenuItems)
+                {
+                    item.IsChecked = true;
+                }
+                ApplyFiltersAndRefreshStatus();
+                RefocusSearchBox();
+            };
+            menu.Items.Add(selectAll);
+
+            var clearSelection = new MenuItem
+            {
+                Header = "清除選取",
+                StaysOpenOnClick = true
+            };
+            clearSelection.Click += (_, __) =>
+            {
+                state.SelectedValues.Clear();
+                state.SearchText = string.Empty;
+                if (searchBox != null)
+                {
+                    searchBox.Text = string.Empty;
+                }
+                foreach (var (_, item) in valueMenuItems)
+                {
+                    item.IsChecked = false;
+                }
+                ApplyFiltersAndRefreshStatus();
+                RefocusSearchBox();
+            };
+            menu.Items.Add(clearSelection);
+
+            menu.Items.Add(new Separator());
+
+            searchBox = new TextBox
+            {
+                MinWidth = 180,
+                Margin = new Thickness(2),
+                Text = state.SearchText ?? string.Empty,
+                ToolTip = "支援萬用字元：*、?"
+            };
+
+            var searchHost = new MenuItem
+            {
+                StaysOpenOnClick = true,
+                Focusable = false,
+                Header = searchBox
+            };
+            menu.Items.Add(searchHost);
+            menu.Items.Add(new Separator());
+
+            foreach (var value in state.AvailableValues)
+            {
+                var item = new MenuItem
+                {
+                    Header = value,
+                    IsCheckable = true,
+                    IsChecked = state.SelectedValues.Contains(value),
+                    StaysOpenOnClick = true
+                };
+
+                item.Click += (_, __) =>
+                {
+                    if (item.IsChecked)
+                        state.SelectedValues.Add(value);
+                    else
+                        state.SelectedValues.Remove(value);
+
+                    ApplyFiltersAndRefreshStatus();
+                };
+                menu.Items.Add(item);
+                valueMenuItems.Add((value, item));
+            }
+
+            void ApplySearchFilter(bool syncSelectionToSearch)
+            {
+                var keyword = (searchBox.Text ?? string.Empty).Trim();
+                state.SearchText = keyword;
+                var matchedValues = new List<string>();
+
+                foreach (var (value, item) in valueMenuItems)
+                {
+                    var isMatch = IsSearchMatch(value, keyword);
+                    item.Visibility = isMatch
+                        ? Visibility.Visible
+                        : Visibility.Collapsed;
+                    if (isMatch)
+                    {
+                        matchedValues.Add(value);
+                    }
+                }
+
+                if (syncSelectionToSearch && !string.IsNullOrEmpty(keyword))
+                {
+                    state.SelectedValues = new HashSet<string>(matchedValues, StringComparer.Ordinal);
+                    foreach (var (value, item) in valueMenuItems)
+                    {
+                        item.IsChecked = state.SelectedValues.Contains(value);
+                    }
+                    ApplyFiltersAndRefreshStatus();
+                }
+            }
+
+            searchBox.TextChanged += (_, __) => ApplySearchFilter(syncSelectionToSearch: true);
+            menu.Opened += (_, __) =>
+            {
+                searchBox.Focus();
+                searchBox.Select(searchBox.Text.Length, 0);
+                ApplySearchFilter(syncSelectionToSearch: false);
+            };
+
+            return menu;
+        }
+
+        private void ApplyFiltersAndRefreshStatus()
+        {
+            _bomItemsView?.Refresh();
+            UpdateFilterUiState();
+            StatusTextBlock.Text = _bomItems.Count > 0
+                ? $"已套用篩選，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆。"
+                : "已套用篩選。";
+        }
+
+        private void ClearAllFiltersSilently()
+        {
+            foreach (var state in _columnFilters.Values)
+            {
+                state.SelectedValues.Clear();
+            }
+            _bomItemsView?.Refresh();
+            UpdateFilterUiState();
+        }
+
+        private static string NormalizeFilterValue(string raw)
+        {
+            return string.IsNullOrWhiteSpace(raw) ? ColumnFilterState.BlankDisplayText : raw.Trim();
+        }
+
+        private static bool IsSearchMatch(string value, string keyword)
+        {
+            if (string.IsNullOrWhiteSpace(keyword))
+                return true;
+
+            var pattern = keyword.Trim();
+            var hasWildcard = pattern.IndexOf('*') >= 0 || pattern.IndexOf('?') >= 0;
+            if (!hasWildcard)
+                return value.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0;
+
+            var regexPattern = "^" + Regex.Escape(pattern)
+                .Replace(@"\*", ".*")
+                .Replace(@"\?", ".") + "$";
+
+            return Regex.IsMatch(value ?? string.Empty, regexPattern, RegexOptions.IgnoreCase);
+        }
+
+        private void EnsureSelectionInitialized(ColumnFilterState state)
+        {
+            if (state.SelectedValues.Count > 0) return;
+            state.SelectedValues = new HashSet<string>(state.AvailableValues, StringComparer.Ordinal);
+        }
+
+        private void RebuildAllFilterValueOptions()
+        {
+            foreach (var state in _columnFilters.Values)
+            {
+                RebuildFilterValueOptions(state);
+            }
+        }
+
+        private void RebuildFilterValueOptions(ColumnFilterState state)
+        {
+            var oldValues = state.AvailableValues ?? new List<string>();
+            var wasUnfiltered =
+                oldValues.Count == 0 ||
+                state.SelectedValues.Count == 0 ||
+                state.SelectedValues.Count == oldValues.Count;
+
+            var values = _bomItems
+                .Select(x => NormalizeFilterValue(state.ValueGetter(x)))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            var hasBlank = values.Any(x => string.Equals(x, ColumnFilterState.BlankDisplayText, StringComparison.Ordinal));
+            var orderedValues = values
+                .Where(x => !string.Equals(x, ColumnFilterState.BlankDisplayText, StringComparison.Ordinal))
+                .OrderBy(x => x, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (hasBlank)
+            {
+                orderedValues.Insert(0, ColumnFilterState.BlankDisplayText);
+            }
+
+            values = orderedValues;
+            state.AvailableValues = values;
+
+            if (wasUnfiltered)
+            {
+                state.SelectedValues = new HashSet<string>(values, StringComparer.Ordinal);
+                return;
+            }
+
+            state.SelectedValues.IntersectWith(values);
+            if (state.SelectedValues.Count == 0)
+            {
+                state.SelectedValues = new HashSet<string>(values, StringComparer.Ordinal);
+            }
+        }
+
+        private void UpdateFilterUiState()
+        {
+            foreach (var col in BomDataGrid.Columns)
+            {
+                if (!(col.Header is ColumnHeaderInfo header)) continue;
+                if (!_columnFilters.TryGetValue(header.Key, out var state))
+                {
+                    header.IsFiltered = false;
+                    continue;
+                }
+
+                header.IsFiltered =
+                    state.AvailableValues.Count > 0 &&
+                    state.SelectedValues.Count > 0 &&
+                    state.SelectedValues.Count < state.AvailableValues.Count;
+            }
+
+            ClearFiltersButton.IsEnabled = HasActiveFilters() && !IsUiBusy();
+        }
+
+        private bool HasActiveFilters()
+        {
+            return _columnFilters.Values.Any(state =>
+                state.AvailableValues.Count > 0 &&
+                state.SelectedValues.Count > 0 &&
+                state.SelectedValues.Count < state.AvailableValues.Count);
+        }
+
+        private int GetFilteredCount()
+        {
+            return _bomItemsView?.Cast<object>().Count() ?? 0;
+        }
+
+        private bool IsUiBusy()
+        {
+            return Mouse.OverrideCursor != null;
         }
     }
 }
