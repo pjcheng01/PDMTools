@@ -49,7 +49,7 @@ namespace PDMTools
         public MainWindow()
         {
             InitializeComponent();
-            ProgressBar.Value = 0;
+            SetProgressPercent(0);
             BomDataGrid.ItemsSource = _bomItems;
 
             // 載入已存的欄位設定
@@ -66,6 +66,8 @@ namespace PDMTools
             }
 
             SetupBomDataGridColumns();
+
+            ResetConfigurationComboNoFile();
 
             StatusTextBlock.Text = ColumnSettings.FileExists
                 ? $"就緒（已載入欄位設定：{_activeCardVarNames.Count} 個）"
@@ -153,7 +155,7 @@ namespace PDMTools
 
         // ── 按鈕事件 ──────────────────────────────────────────────────────
 
-        private void BrowseButton_OnClick(object sender, RoutedEventArgs e)
+        private async void BrowseButton_OnClick(object sender, RoutedEventArgs e)
         {
             var dialog = new OpenFileDialog
             {
@@ -166,12 +168,16 @@ namespace PDMTools
                 Multiselect = false
             };
 
-            if (dialog.ShowDialog(this) == true)
+            if (dialog.ShowDialog(this) != true)
             {
-                AssemblyPathTextBox.Text = dialog.FileName;
-                StatusTextBlock.Text = "已選擇組合件。";
-                _bomItems.Clear();
+                return;
             }
+
+            AssemblyPathTextBox.Text = dialog.FileName;
+            StatusTextBlock.Text = "已選擇組合件。";
+            _bomItems.Clear();
+
+            await PopulateConfigurationComboForPathAsync(dialog.FileName);
         }
 
         private async void StartGrabButton_OnClick(object sender, RoutedEventArgs e)
@@ -201,7 +207,25 @@ namespace PDMTools
                 maxBomLayerDepth = maxDepth;
             }
 
-            await RunGrabFlowAsync(assemblyPath, includeRootBomItem, maxBomLayerDepth);
+            if (ConfigComboBox.SelectedItem == null || ConfigComboBox.Items.Count == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "請先以「瀏覽」選擇組合件，並等待組態清單載入完成後，再從「組態」下拉選單選取組態。",
+                    "提醒",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            var configurationName = (ConfigComboBox.SelectedItem as string ?? ConfigComboBox.SelectedItem?.ToString() ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(configurationName))
+            {
+                MessageBox.Show(this, "請在「組態」下拉選單選取一個組態。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            await RunGrabFlowAsync(assemblyPath, includeRootBomItem, maxBomLayerDepth, configurationName);
         }
 
         private async void ExportButton_OnClick(object sender, RoutedEventArgs e)
@@ -254,9 +278,10 @@ namespace PDMTools
             }
 
             SetUiBusy(true);
+            SetProgressPercent(0);
             IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
             {
-                ProgressBar.Value = Math.Max(0, Math.Min(100, p.Percentage));
+                SetProgressPercent(p.Percentage);
                 StatusTextBlock.Text = p.Message;
             });
 
@@ -278,7 +303,7 @@ namespace PDMTools
                 StatusTextBlock.Text = drwCount > 0
                     ? $"已顯示工程圖列（找到 {drwCount} 個工程圖，共 {_bomItems.Count} 列）。"
                     : $"未找到任何工程圖，共 {_bomItems.Count} 筆零組件。";
-                ProgressBar.Value = 0;
+                SetProgressPercent(0);
 
                 await Dispatcher.InvokeAsync(AutoSizeDataGridColumns, DispatcherPriority.Loaded);
             }
@@ -302,7 +327,7 @@ namespace PDMTools
         {
             SetUiBusy(true);
             StatusTextBlock.Text = "正在從 Vault 讀取可用變數清單...";
-            ProgressBar.Value = 0;
+            SetProgressPercent(0);
 
             IReadOnlyList<string> allVars = null;
             try
@@ -311,7 +336,7 @@ namespace PDMTools
                 // 傳入目前選取的組合件路徑作為樣本，供 Vault 層級失敗時改從檔案列舉
                 var samplePath = AssemblyPathTextBox.Text?.Trim();
                 allVars = await _exportService.EnumerateVaultVariablesAsync(samplePath);
-                ProgressBar.Value = 0;
+                SetProgressPercent(0);
             }
             catch (Exception ex)
             {
@@ -446,20 +471,173 @@ namespace PDMTools
 
         // ── 核心流程 ──────────────────────────────────────────────────────
 
-        private async Task RunGrabFlowAsync(string assemblyPath, bool includeRootBomItem, int? maxBomLayerDepth)
+        /// <summary>尚未選檔或無法載入組態時：清空下拉並停用，避免使用者誤以為可手動輸入。</summary>
+        private void ResetConfigurationComboNoFile()
+        {
+            ConfigComboBox.Items.Clear();
+            ConfigComboBox.SelectedItem = null;
+            ConfigComboBox.IsEnabled = false;
+        }
+
+        /// <summary>
+        /// 優先選取 PDM 回報之「文件作用中組態」（若存在於清單）；否則「預設」「Default」「默认」；再否則第一筆。
+        /// </summary>
+        private static string PickPreferredConfiguration(IReadOnlyList<string> cfgs, string documentActiveConfiguration)
+        {
+            if (cfgs == null || cfgs.Count == 0)
+            {
+                return null;
+            }
+
+            string Find(string name) =>
+                cfgs.FirstOrDefault(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase));
+
+            var active = documentActiveConfiguration?.Trim();
+            if (!string.IsNullOrEmpty(active))
+            {
+                var hit = Find(active);
+                if (!string.IsNullOrEmpty(hit))
+                {
+                    return hit;
+                }
+            }
+
+            return Find("預設") ?? Find("Default") ?? Find("默认") ?? cfgs[0];
+        }
+
+        private static bool ComboBoxHasItemIgnoreCase(ComboBox box, string value)
+        {
+            foreach (var it in box.Items)
+            {
+                var s = it as string ?? it?.ToString();
+                if (string.Equals(s, value, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private async Task PopulateConfigurationComboForPathAsync(string assemblyPath)
+        {
+            if (string.IsNullOrWhiteSpace(assemblyPath) || !File.Exists(assemblyPath))
+            {
+                return;
+            }
+
+            try
+            {
+                _exportService = _exportService ?? new PdmBomExportService();
+                var cfgs = await _exportService.GetAssemblyConfigurationsAsync(assemblyPath);
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var ordered = new List<string>();
+                foreach (var c in cfgs)
+                {
+                    if (string.IsNullOrWhiteSpace(c))
+                    {
+                        continue;
+                    }
+
+                    var t = c.Trim();
+                    if (seen.Add(t))
+                    {
+                        ordered.Add(t);
+                    }
+                }
+
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    ConfigComboBox.Items.Clear();
+                    ConfigComboBox.SelectedItem = null;
+
+                    if (ordered.Count == 0)
+                    {
+                        ConfigComboBox.IsEnabled = false;
+                        StatusTextBlock.Text = "已選擇組合件，但無法從 PDM 讀取組態清單。";
+                        var detail = _exportService?.LastConfigurationEnumerationDiag ?? string.Empty;
+                        if (detail.Length > 2800)
+                        {
+                            detail = detail.Substring(0, 2800) + "\n…（以下略）";
+                        }
+
+                        MessageBox.Show(
+                            this,
+                            "無法從 PDM 讀取此組合件的組態清單，因此無法選擇組態。\n\n"
+                            + "請確認：\n"
+                            + "• 檔案已同步為本機最新版且可正常在 PDM 中開啟\n"
+                            + "• 本機 PDM 用戶端與程式參考的 EPDM Interop 版本一致\n"
+                            + "• 必要時請先以 SolidWorks／PDM 開啟該組合件一次後再試\n\n"
+                            + (string.IsNullOrWhiteSpace(detail)
+                                ? string.Empty
+                                : "── 程式診斷（可複製給開發者）──\n" + detail),
+                            "無法載入組態",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Warning);
+                        return;
+                    }
+
+                    foreach (var c in ordered)
+                    {
+                        if (!ComboBoxHasItemIgnoreCase(ConfigComboBox, c))
+                        {
+                            ConfigComboBox.Items.Add(c);
+                        }
+                    }
+
+                    var preferred = PickPreferredConfiguration(ordered, _exportService?.LastDocumentActiveConfiguration);
+                    foreach (var it in ConfigComboBox.Items)
+                    {
+                        var s = it as string ?? it?.ToString();
+                        if (string.Equals(s, preferred, StringComparison.OrdinalIgnoreCase))
+                        {
+                            ConfigComboBox.SelectedItem = it;
+                            break;
+                        }
+                    }
+
+                    ConfigComboBox.IsEnabled = true;
+                    StatusTextBlock.Text =
+                        $"已選擇組合件，已載入 {ordered.Count} 個組態；預設選取「{preferred}」（優先為文件作用中組態，可改選）。";
+                });
+            }
+            catch (Exception ex)
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    ConfigComboBox.Items.Clear();
+                    ConfigComboBox.SelectedItem = null;
+                    ConfigComboBox.IsEnabled = false;
+                    StatusTextBlock.Text = "已選擇組合件，但讀取組態時發生錯誤。";
+                    MessageBox.Show(
+                        this,
+                        "讀取組態清單時發生錯誤：\n" + ex.Message,
+                        "錯誤",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error);
+                });
+            }
+        }
+
+        private async Task RunGrabFlowAsync(
+            string assemblyPath,
+            bool includeRootBomItem,
+            int? maxBomLayerDepth,
+            string configurationName)
         {
             SetUiBusy(true);
+            SetProgressPercent(0);
 
             IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
             {
-                ProgressBar.Value = Math.Max(0, Math.Min(100, p.Percentage));
+                SetProgressPercent(p.Percentage);
                 StatusTextBlock.Text = p.Message;
             });
 
             try
             {
                 _exportService = _exportService ?? new PdmBomExportService();
-                progress.Report(new ProgressInfo(0, "開始抓取 BOM 與資料卡..."));
+                progress.Report(new ProgressInfo(0, "開始抓取 BOM 與資料卡…"));
                 _bomItems.Clear();
 
                 var items = await _exportService.CollectBomAsync(
@@ -467,6 +645,7 @@ namespace PDMTools
                     _activeCardVarNames,
                     includeRootBomItem,
                     maxBomLayerDepth,
+                    configurationName,
                     progress,
                     _cancellationTokenSource.Token);
 
@@ -479,8 +658,13 @@ namespace PDMTools
                 foreach (var item in items)
                     _bomItems.Add(item);
 
-                StatusTextBlock.Text = $"抓取完成，共 {_bomItems.Count} 筆。";
-                ProgressBar.Value = 0;
+                var cfg = _exportService.LastConfigurationResolved;
+                var layout = _exportService.LastBomLayoutNameUsed;
+                StatusTextBlock.Text =
+                    string.IsNullOrWhiteSpace(cfg) && string.IsNullOrWhiteSpace(layout)
+                        ? $"抓取完成，共 {_bomItems.Count} 筆。"
+                        : $"抓取完成，共 {_bomItems.Count} 筆。（組態：{cfg}；BOM 版面：{layout}）";
+                SetProgressPercent(0);
 
                 await Dispatcher.InvokeAsync(new Action(AutoSizeDataGridColumns), DispatcherPriority.Loaded);
             }
@@ -501,10 +685,11 @@ namespace PDMTools
         private async Task RunExportExcelOnlyAsync(string outputPath)
         {
             SetUiBusy(true);
+            SetProgressPercent(0);
 
             IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
             {
-                ProgressBar.Value = Math.Max(0, Math.Min(100, p.Percentage));
+                SetProgressPercent(p.Percentage);
                 StatusTextBlock.Text = p.Message;
             });
 
@@ -543,7 +728,7 @@ namespace PDMTools
             finally
             {
                 SetUiBusy(false);
-                ProgressBar.Value = 0;
+                SetProgressPercent(0);
                 StatusTextBlock.Text = _bomItems.Count > 0
                     ? $"抓取完成，共 {_bomItems.Count} 筆。（可匯出 xlsx）"
                     : "就緒";
@@ -559,6 +744,14 @@ namespace PDMTools
             // Toggle 只在有資料時才可操作，忙碌中一律禁用
             ShowDrawingsToggle.IsEnabled   = !isBusy && _rawBomItems.Count > 0;
             Mouse.OverrideCursor           = isBusy ? Cursors.Wait : null;
+        }
+
+        /// <summary>同步更新進度條與右側固定位置之百分比文字。</summary>
+        private void SetProgressPercent(double value)
+        {
+            var v = Math.Max(0, Math.Min(100, value));
+            ProgressBar.Value = v;
+            ProgressPercentTextBlock.Text = $"{(int)Math.Round(v, MidpointRounding.AwayFromZero)}%";
         }
     }
 }

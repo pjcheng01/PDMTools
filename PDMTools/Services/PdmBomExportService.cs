@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using ClosedXML.Excel;
@@ -81,6 +82,20 @@ namespace PDMTools.Services
 
         /// <summary>上次執行列舉的診斷記錄（供 UI 顯示）。</summary>
         public string LastEnumerationDiag { get; private set; } = string.Empty;
+
+        /// <summary>上次抓取時實際使用的 BOM 版面名稱（經計算 BOM）。</summary>
+        public string LastBomLayoutNameUsed { get; private set; } = string.Empty;
+
+        /// <summary>上次抓取時解析後的 SolidWorks 組態名稱。</summary>
+        public string LastConfigurationResolved { get; private set; } = string.Empty;
+
+        /// <summary>上次嘗試列舉組態時的反射／呼叫記錄（列舉失敗時供除錯）。</summary>
+        public string LastConfigurationEnumerationDiag { get; private set; } = string.Empty;
+
+        /// <summary>
+        /// 上次從 PDM 檔案物件讀到的「文件作用中組態」名稱（供 UI 預設選取）；若 API 無此屬性或讀取失敗則為空字串。
+        /// </summary>
+        public string LastDocumentActiveConfiguration { get; private set; } = string.Empty;
 
         /// <summary>
         /// 從指定檔案的 GetEnumeratorVariable() 枚舉所有可用的卡片變數名稱。
@@ -307,11 +322,16 @@ namespace PDMTools.Services
                 .ToList();
         }
 
+        /// <summary>
+        /// 以 PDM「經計算的 BOM」（IEdmFile7.GetComputedBOM）取得階層與用量；讀取資料卡變數仍用 PDM API。
+        /// </summary>
+        /// <param name="configurationName">SolidWorks 組態名稱；空白時優先使用文件作用中組態，其次「預設」／Default／清單第一筆。</param>
         public async Task<IReadOnlyList<BomItem>> CollectBomAsync(
             string assemblyPath,
             IReadOnlyList<string> cardVarNames,
             bool includeRootBomItem,
             int? maxBomLayerDepth,
+            string configurationName,
             IProgress<ProgressInfo> progress,
             CancellationToken cancellationToken = default)
         {
@@ -333,12 +353,13 @@ namespace PDMTools.Services
                 }
 
                 EnsureVaultLogin();
-                progress?.Report(new ProgressInfo(10, "已登入 PDM Vault，開始解析參考樹..."));
+                // 第一次抓取：進度條獨立使用 0～100（與「顯示工程圖」分開，互不沿用區段）。
+                progress?.Report(new ProgressInfo(0, "已登入 Vault，正在開啟經計算的 BOM…"));
 
-                var items = new List<BomItem>();
                 IEdmFolder5 folder = null;
                 IEdmFile5 file = null;
-                IEdmReference5 refTree = null;
+                IEdmBomMgr bomMgr = null;
+                IEdmBomView bomView = null;
 
                 try
                 {
@@ -348,137 +369,1689 @@ namespace PDMTools.Services
                         throw new InvalidOperationException("無法從 PDM 取得檔案資訊。");
                     }
 
-                    refTree = GetReferenceTree(file, folder);
-                    if (refTree == null)
+                    var file7 = file as IEdmFile7;
+                    if (file7 == null)
                     {
-                        throw new InvalidOperationException("無法取得參考樹，請確認檔案版本或 PDM 權限。");
+                        throw new InvalidOperationException(
+                            "目前 PDM Interop 不支援 IEdmFile7，無法取得「經計算的 BOM」。請確認已安裝 SolidWorks PDM Professional 並使用對應版本的 EPDM Interop。");
                     }
 
-                    if (includeRootBomItem)
+                    var vault7 = _vault as IEdmVault7;
+                    if (vault7 == null)
                     {
-                        var rootItem = BuildBomItem("1", file, assemblyPath, string.Empty, cardVarNames);
-                        items.Add(rootItem);
+                        throw new InvalidOperationException("無法將 Vault 轉型為 IEdmVault7，無法建立 BOM 管理員。");
+                    }
 
-                        // root 在 BOM 顯示層 => root 視為 layer 1
-                        TraverseReferenceNodes(
-                            parentNode: refTree,
-                            parentLevelPrefix: "1",
-                            parentLayer: 1,
-                            maxBomLayerDepth: maxBomLayerDepth,
-                            output: items,
-                            ancestryPaths: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { assemblyPath },
-                            cardVarNames: cardVarNames,
-                            progress: progress,
-                            cancellationToken: cancellationToken);
-                    }
-                    else
+                    bomMgr = vault7.CreateUtility(EdmUtility.EdmUtil_BomMgr) as IEdmBomMgr;
+                    if (bomMgr == null)
                     {
-                        // root 不顯示 => root 視為 layer 0，第一層子件顯示為 layer 1
-                        TraverseReferenceNodes(
-                            parentNode: refTree,
-                            parentLevelPrefix: string.Empty,
-                            parentLayer: 0,
-                            maxBomLayerDepth: maxBomLayerDepth,
-                            output: items,
-                            ancestryPaths: new HashSet<string>(StringComparer.OrdinalIgnoreCase) { assemblyPath },
-                            cardVarNames: cardVarNames,
-                            progress: progress,
-                            cancellationToken: cancellationToken);
+                        throw new InvalidOperationException("無法建立 IEdmBomMgr（BOM 管理員）。");
                     }
+
+                    EdmBomLayout[] layouts = null;
+                    bomMgr.GetBomLayouts(out layouts);
+                    if (layouts == null || layouts.Length == 0)
+                    {
+                        throw new InvalidOperationException(
+                            "Vault 未回傳任何 BOM 版面。請在 PDM 管理工具確認已設定 BOM 類型／版面。");
+                    }
+
+                    var layout = SelectPrimaryBomLayout(layouts);
+                    LastBomLayoutNameUsed = layout.mbsLayoutName ?? string.Empty;
+                    var configResolved = ResolveConfigurationName(file7, file, folder, configurationName);
+                    LastConfigurationResolved = configResolved;
+
+                    bomView = TryOpenComputedBomView(file7, file, layout, configResolved);
+                    if (bomView == null)
+                    {
+                        throw new InvalidOperationException(
+                            $"無法取得經計算的 BOM（版面「{LastBomLayoutNameUsed}」、組態「{configResolved}」）。請在 PDM 中確認「經計算的 BOM」與組態名稱是否一致。");
+                    }
+
+                    EdmBomColumn[] columns = null;
+                    bomView.GetColumns(out columns);
+
+                    object[] rows = null;
+                    bomView.GetRows(out rows);
+                    if (rows == null)
+                    {
+                        rows = Array.Empty<object>();
+                    }
+
+                    progress?.Report(new ProgressInfo(5, "已載入 BOM 列，正在解析（0～100%）…"));
+
+                    var items = BuildBomItemsFromComputedRows(
+                        assemblyPath,
+                        rows,
+                        columns,
+                        cardVarNames,
+                        includeRootBomItem,
+                        maxBomLayerDepth,
+                        configResolved,
+                        progress,
+                        progressWhileParsingMin: 5,
+                        progressWhileParsingMax: 100,
+                        cancellationToken);
+
+                    progress?.Report(new ProgressInfo(100, $"解析完成，共 {items.Count} 筆。"));
+                    return (IReadOnlyList<BomItem>)items;
                 }
                 finally
                 {
-                    ComHelper.Release(refTree);
+                    ComHelper.Release(bomView);
+                    ComHelper.Release(bomMgr);
                     ComHelper.Release(folder);
                     ComHelper.Release(file);
                 }
-
-                // 用量統計：在父階底下，相同檔案路徑出現幾次（不含工程圖 .SLDDRW）
-                ComputeUsageCounts(items, assemblyPath, includeRootBomItem);
-
-                progress?.Report(new ProgressInfo(75, $"解析完成，共 {items.Count} 筆。"));
-                return (IReadOnlyList<BomItem>)items;
             }, cancellationToken);
         }
 
         /// <summary>
-        /// 計算每一列的「用量統計」：
-        /// 同一個父階（由 item.Level 推回）底下，相同檔案路徑（item.FullPath）出現幾次。
-        /// 只統計 .SLDASM/.SLDPRT；.SLDDRW 保持 null。
+        /// 列舉指定組合件檔案中的 SolidWorks 組態名稱（供 UI 下拉）；失敗時回傳空清單。
         /// </summary>
-        private static void ComputeUsageCounts(
-            IReadOnlyList<BomItem> items,
-            string rootAssemblyPath,
-            bool includeRootBomItem)
+        public async Task<IReadOnlyList<string>> GetAssemblyConfigurationsAsync(string assemblyPath)
         {
-            // key = parentFullPath|childFullPath
-            // 父階組件的 FullPath 來自 Level 對應的那列；ROOT 則用抓取根組合件路徑。
-            var levelToFullPath = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var it in items)
+            return await Task.Run(() =>
             {
-                if (it == null) continue;
-                if (!IsAsmOrPart(it.FullPath)) continue;
-                if (string.IsNullOrWhiteSpace(it.Level)) continue;
-                levelToFullPath[it.Level] = it.FullPath;
-            }
-
-            var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var item in items)
-            {
-                if (item == null) continue;
-                if (!IsAsmOrPart(item.FullPath)) continue;
-
-                // root 本身不顯示 UsageCount
-                if (includeRootBomItem &&
-                    string.Equals(item.FullPath, rootAssemblyPath, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(item.Level, "1", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var parentLevelKey = GetParentLevelKey(item.Level);
-                var parentFullPath = parentLevelKey.Equals("ROOT", StringComparison.OrdinalIgnoreCase)
-                    ? rootAssemblyPath
-                    : (levelToFullPath.TryGetValue(parentLevelKey, out var p) ? p : null);
-
-                if (string.IsNullOrWhiteSpace(parentFullPath)) continue;
-
-                var key = parentFullPath + "|" + item.FullPath;
-                counts.TryGetValue(key, out var c);
-                counts[key] = c + 1;
-            }
-
-            foreach (var item in items)
-            {
-                if (item == null) continue;
-
-                if (!IsAsmOrPart(item.FullPath))
+                if (string.IsNullOrWhiteSpace(assemblyPath) || !File.Exists(assemblyPath))
                 {
-                    item.UsageCount = null;
+                    return (IReadOnlyList<string>)Array.Empty<string>();
+                }
+
+                if (!assemblyPath.StartsWith(VaultRootPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    return (IReadOnlyList<string>)Array.Empty<string>();
+                }
+
+                EnsureVaultLogin();
+                IEdmFolder5 folder = null;
+                IEdmFile5 file = null;
+                try
+                {
+                    file = _vault.GetFileFromPath(assemblyPath, out folder);
+                    if (file == null)
+                    {
+                        LastDocumentActiveConfiguration = string.Empty;
+                        return (IReadOnlyList<string>)Array.Empty<string>();
+                    }
+
+                    LastDocumentActiveConfiguration = TryGetDocumentActiveConfigurationName(file) ?? string.Empty;
+
+                    var file7 = file as IEdmFile7;
+                    if (file7 == null)
+                    {
+                        LastConfigurationEnumerationDiag = "無法將檔案物件轉型為 IEdmFile7，PDM Interop 版本可能過舊。";
+                        return (IReadOnlyList<string>)Array.Empty<string>();
+                    }
+
+                    var diag = new StringBuilder();
+                    var latestVer = GetLatestVaultVersionNumber(file);
+                    var names = InvokeGetConfigurations(file7, file, folder, latestVer, diag);
+                    LastConfigurationEnumerationDiag = diag.ToString();
+                    return names.Count > 0
+                        ? (IReadOnlyList<string>)names
+                        : (IReadOnlyList<string>)Array.Empty<string>();
+                }
+                finally
+                {
+                    ComHelper.Release(folder);
+                    ComHelper.Release(file);
+                }
+            });
+        }
+
+        private static EdmBomLayout SelectPrimaryBomLayout(EdmBomLayout[] layouts)
+        {
+            foreach (var lo in layouts)
+            {
+                var n = lo.mbsLayoutName ?? string.Empty;
+                if (n.IndexOf("solidworks", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    n.IndexOf("經計算", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    n.IndexOf("計算", StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    return lo;
+                }
+            }
+
+            return layouts[0];
+        }
+
+        /// <summary>
+        /// GetComputedBOM 第一參數為 layout id 或版面名稱；部分環境需明確以 object 傳遞或改用名稱字串。
+        /// </summary>
+        private static IEdmBomView TryOpenComputedBomView(
+            IEdmFile7 file7,
+            IEdmFile5 file,
+            EdmBomLayout layout,
+            string configurationName)
+        {
+            var ver = GetLatestVaultVersionNumber(file);
+            const int bomFlags = 0;
+
+            IEdmBomView view = null;
+            try
+            {
+                view = file7.GetComputedBOM((object)layout.mlLayoutID, ver, configurationName, bomFlags) as IEdmBomView;
+            }
+            catch
+            {
+                view = null;
+            }
+
+            if (view != null)
+            {
+                return view;
+            }
+
+            var name = layout.mbsLayoutName?.Trim();
+            if (string.IsNullOrEmpty(name))
+            {
+                return null;
+            }
+
+            try
+            {
+                return file7.GetComputedBOM(name, ver, configurationName, bomFlags) as IEdmBomView;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static string ResolveConfigurationName(
+            IEdmFile7 file7,
+            IEdmFile5 file,
+            IEdmFolder5 folder,
+            string requested)
+        {
+            var latestVer = GetLatestVaultVersionNumber(file);
+            var available = InvokeGetConfigurations(file7, file, folder, latestVer, null);
+            var req = requested?.Trim() ?? string.Empty;
+
+            if (!string.IsNullOrEmpty(req) &&
+                available.Any(a => string.Equals(a, req, StringComparison.OrdinalIgnoreCase)))
+            {
+                return available.First(a => string.Equals(a, req, StringComparison.OrdinalIgnoreCase));
+            }
+
+            var active = TryGetDocumentActiveConfigurationName(file);
+            if (!string.IsNullOrWhiteSpace(active))
+            {
+                var activeHit = available.FirstOrDefault(a =>
+                    string.Equals(a, active.Trim(), StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrEmpty(activeHit))
+                {
+                    return activeHit;
+                }
+            }
+
+            foreach (var cand in new[] { "預設", "Default", "默认" })
+            {
+                var hit = available.FirstOrDefault(a => string.Equals(a, cand, StringComparison.OrdinalIgnoreCase));
+                if (!string.IsNullOrEmpty(hit))
+                {
+                    return hit;
+                }
+            }
+
+            if (available.Count > 0)
+            {
+                return available[0];
+            }
+
+            return string.IsNullOrEmpty(req) ? "Default" : req;
+        }
+
+        /// <summary>Vault 資料庫中該檔案的目前版號（最新版），供 GetComputedBOM／GetConfigurations 使用。</summary>
+        private static int GetLatestVaultVersionNumber(IEdmFile5 file)
+        {
+            if (file == null)
+            {
+                throw new ArgumentNullException(nameof(file));
+            }
+
+            return file.CurrentVersion;
+        }
+
+        /// <summary>
+        /// 嘗試從 PDM 檔案 COM 物件讀取 SolidWorks「目前作用中組態」名稱（各版 Interop 屬性／方法名稱不一，故以反射嘗試）。
+        /// </summary>
+        private static string TryGetDocumentActiveConfigurationName(IEdmFile5 file)
+        {
+            if (file == null)
+            {
+                return null;
+            }
+
+            var asm = typeof(IEdmFile5).Assembly;
+            var ifaceOrder = new[] { "IEdmFile9", "IEdmFile8", "IEdmFile7", "IEdmFile6", "IEdmFile5" };
+            foreach (var ifaceName in ifaceOrder)
+            {
+                var t = asm.GetType("EPDM.Interop.epdm." + ifaceName, false, false);
+                if (t == null)
+                {
                     continue;
                 }
 
-                if (includeRootBomItem &&
-                    string.Equals(item.FullPath, rootAssemblyPath, StringComparison.OrdinalIgnoreCase) &&
-                    string.Equals(item.Level, "1", StringComparison.OrdinalIgnoreCase))
+                foreach (var propName in new[]
+                         {
+                             "ActiveConfiguration",
+                             "ActiveConfigurationName",
+                             "ActiveConfigName",
+                             "DocumentActiveConfiguration"
+                         })
                 {
-                    item.UsageCount = null;
-                    continue;
+                    try
+                    {
+                        var p = t.GetProperty(propName, BindingFlags.Public | BindingFlags.Instance);
+                        if (p == null)
+                        {
+                            continue;
+                        }
+
+                        var v = p.GetValue(file);
+                        var s = v?.ToString()?.Trim();
+                        if (!string.IsNullOrEmpty(s))
+                        {
+                            return s;
+                        }
+                    }
+                    catch
+                    {
+                        // 下一個候選
+                    }
                 }
 
-                var parentLevelKey = GetParentLevelKey(item.Level);
-                var parentFullPath = parentLevelKey.Equals("ROOT", StringComparison.OrdinalIgnoreCase)
-                    ? rootAssemblyPath
-                    : (levelToFullPath.TryGetValue(parentLevelKey, out var p) ? p : null);
-
-                if (string.IsNullOrWhiteSpace(parentFullPath))
+                foreach (var methodName in new[] { "GetActiveConfigurationName", "GetActiveConfiguration" })
                 {
-                    item.UsageCount = null;
-                    continue;
+                    try
+                    {
+                        var methods = t.GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                            .Where(m => string.Equals(m.Name, methodName, StringComparison.Ordinal)
+                                        && m.GetParameters().Length == 0);
+                        foreach (var m in methods)
+                        {
+                            var v = m.Invoke(file, null);
+                            var s = v?.ToString()?.Trim();
+                            if (!string.IsNullOrEmpty(s))
+                            {
+                                return s;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // 下一個候選
+                    }
                 }
-
-                var key = parentFullPath + "|" + item.FullPath;
-                item.UsageCount = counts.TryGetValue(key, out var c) ? c : (int?)null;
             }
+
+            return null;
+        }
+
+        /// <summary>
+        /// PDM 各版 interop 中 GetConfigurations 簽章不一。COM RCW 多為 __ComObject，必須從 <see cref="IEdmFile7"/> 等介面取得 MethodInfo 再 Invoke。
+        /// </summary>
+        private static List<string> InvokeGetConfigurations(
+            IEdmFile7 file7,
+            IEdmFile5 file,
+            IEdmFolder5 folder,
+            int latestVaultVersion,
+            StringBuilder diag)
+        {
+            var result = new List<string>();
+            var folderId = 0;
+            try
+            {
+                folderId = folder?.ID ?? 0;
+            }
+            catch
+            {
+                folderId = 0;
+            }
+
+            var log = diag ?? new StringBuilder();
+
+            if (TryGetConfigurationsDirect(file7, file, latestVaultVersion, result, log))
+            {
+                return result;
+            }
+
+            foreach (var comTarget in new object[] { file7, file })
+            {
+                if (comTarget == null)
+                {
+                    continue;
+                }
+
+                TryInvokeGetConfigurationsReflection(comTarget, folderId, latestVaultVersion, result, log);
+                if (result.Count > 0)
+                {
+                    return result;
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// 以編譯期介面呼叫 GetConfigurations，避免 MethodInfo.Invoke 對 COM ref object 封送失敗（常見為 TargetInvocationException）。
+        /// </summary>
+        private static bool TryGetConfigurationsDirect(
+            IEdmFile7 file7,
+            IEdmFile5 file,
+            int latestVaultVersion,
+            List<string> result,
+            StringBuilder log)
+        {
+            if (file7 == null)
+            {
+                return false;
+            }
+
+            log.AppendLine("── IEdmFile7.GetConfigurations 直接呼叫（ref object），版次＝Vault 最新（" + latestVaultVersion + "）──");
+            string rev = null;
+            try
+            {
+                rev = file?.CurrentRevision;
+            }
+            catch
+            {
+                // ignore
+            }
+
+            foreach (var cand in EnumerateGetConfigurationsRefObjectCandidates(latestVaultVersion, rev))
+            {
+                try
+                {
+                    object arg = cand;
+                    var ret = file7.GetConfigurations(ref arg);
+                    var before = result.Count;
+                    // 部分 PDM 版次：清單在回傳值；部分則寫回 ref 參數（或兩者皆有）— 須併採。
+                    TryConsumeReturnValueForConfigurationList(result, ret);
+                    TryAddConfigNames(result, arg);
+                    if (result.Count > before)
+                    {
+                        log.AppendLine("  → 成功，ref 輸入：" + FormatArgForDiag(cand));
+                        return true;
+                    }
+
+                    if (ret != null || arg != cand)
+                    {
+                        log.AppendLine(
+                            "  → ref=" + FormatArgForDiag(cand) + " 呼叫未丟例外但解析為 0 筆（回傳型別："
+                            + (ret?.GetType().FullName ?? "null") + "；ref 型別：" + (arg?.GetType().FullName ?? "null") + "）");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    log.AppendLine("  → 失敗 ref=" + FormatArgForDiag(cand) + "：" + FormatExceptionChain(ex));
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>
+        /// ref 參數候選順序：先 null（多數環境代表「目前／預設版次語意」），再 Vault 最新版號、修訂字串。
+        /// 不傳本機路徑，避免誤當修訂而 HRESULT 0x80040224。
+        /// </summary>
+        private static IEnumerable<object> EnumerateGetConfigurationsRefObjectCandidates(
+            int latestVaultVersion,
+            string currentRevision)
+        {
+            yield return null;
+            yield return (object)latestVaultVersion;
+            if (!string.IsNullOrWhiteSpace(currentRevision))
+            {
+                yield return (object)currentRevision.Trim();
+            }
+        }
+
+        private static string FormatArgForDiag(object o) => o == null ? "null" : o.ToString();
+
+        private static string FormatExceptionChain(Exception ex)
+        {
+            if (ex == null)
+            {
+                return string.Empty;
+            }
+
+            var sb = new StringBuilder();
+            var depth = 0;
+            for (var e = ex; e != null && depth < 8; e = e.InnerException, depth++)
+            {
+                sb.AppendLine($"    [{depth}] {e.GetType().Name}: {e.Message}");
+                if (e is System.Runtime.InteropServices.COMException comEx)
+                {
+                    sb.AppendLine($"         HRESULT=0x{(uint)comEx.ErrorCode:X8}");
+                }
+            }
+
+            return sb.ToString().TrimEnd();
+        }
+
+        private static void TryInvokeGetConfigurationsReflection(
+            object comTarget,
+            int folderId,
+            int latestVaultVersion,
+            List<string> result,
+            StringBuilder diag)
+        {
+            var log = diag ?? new StringBuilder();
+            log.AppendLine("── GetConfigurations 列舉診斷 ──");
+
+            var ifaceTypes = new List<Type> { typeof(IEdmFile7), typeof(IEdmFile5) };
+            try
+            {
+                var asm = typeof(IEdmFile5).Assembly;
+                foreach (var extra in new[] { "IEdmFile6", "IEdmFile8", "IEdmFile9" })
+                {
+                    var tExtra = asm.GetType("EPDM.Interop.epdm." + extra, throwOnError: false, ignoreCase: false);
+                    if (tExtra != null)
+                    {
+                        ifaceTypes.Add(tExtra);
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            var seenSig = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var it in ifaceTypes.Distinct())
+            {
+                MethodInfo[] methods;
+                try
+                {
+                    methods = it.GetMethods(BindingFlags.Instance | BindingFlags.Public);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                foreach (var m in methods.Where(x => string.Equals(x.Name, "GetConfigurations", StringComparison.Ordinal)))
+                {
+                    var sig = (m.DeclaringType?.FullName ?? "?") + "." + m.Name + "("
+                              + string.Join(", ", m.GetParameters().Select(p => p.ParameterType.Name + " " + p.Name)) + ")"
+                              + " -> " + m.ReturnType.Name;
+                    if (!seenSig.Add(sig))
+                    {
+                        continue;
+                    }
+
+                    log.AppendLine(sig);
+                    TryInvokeSingleGetConfigurationsMethod(m, comTarget, folderId, latestVaultVersion, result, log);
+                    if (result.Count > 0)
+                    {
+                        return;
+                    }
+                }
+            }
+
+            // 備援：執行個體 CLR 型別（非 __ComObject 時）
+            try
+            {
+                var rt = comTarget.GetType();
+                if (rt.FullName != "System.__ComObject")
+                {
+                    foreach (var m in rt.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                        .Where(x => string.Equals(x.Name, "GetConfigurations", StringComparison.Ordinal)))
+                    {
+                        log.AppendLine("(runtime) " + m);
+                        TryInvokeSingleGetConfigurationsMethod(m, comTarget, folderId, latestVaultVersion, result, log);
+                        if (result.Count > 0)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            log.AppendLine("（結束：未取得任何組態名稱）");
+        }
+
+        private static void TryInvokeSingleGetConfigurationsMethod(
+            MethodInfo m,
+            object comTarget,
+            int folderId,
+            int latestVaultVersion,
+            List<string> result,
+            StringBuilder diag)
+        {
+            string revisionName = null;
+            try
+            {
+                revisionName = (comTarget as IEdmFile5)?.CurrentRevision;
+            }
+            catch
+            {
+                // ignore
+            }
+
+            var before = result.Count;
+            foreach (var args in BuildGetConfigurationsArgumentVariants(
+                m.GetParameters(),
+                folderId,
+                latestVaultVersion,
+                revisionName))
+            {
+                if (args.Length != m.GetParameters().Length)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var ret = m.Invoke(comTarget, args);
+
+                    // 回傳值與 ref/out 皆可能帶 EdmStrLst5／字串（不可只採一邊）。
+                    if (m.ReturnType != typeof(void) && ret != null)
+                    {
+                        TryConsumeReturnValueForConfigurationList(result, ret);
+                    }
+
+                    foreach (var p in m.GetParameters().Select((param, idx) => (param, idx)))
+                    {
+                        if (p.param.ParameterType.IsByRef || p.param.IsOut)
+                        {
+                            TryAddConfigNames(result, args[p.idx]);
+                        }
+                    }
+
+                    if (result.Count > before)
+                    {
+                        diag.AppendLine("  → 成功，參數組：" + FormatArgsForDiag(args));
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    diag.AppendLine("  → 失敗 " + FormatArgsForDiag(args) + "：" + FormatExceptionChain(ex));
+                }
+            }
+        }
+
+        private static string FormatArgsForDiag(object[] args)
+        {
+            if (args == null || args.Length == 0)
+            {
+                return "()";
+            }
+
+            return "(" + string.Join(", ", args.Select(a => a == null ? "null" : a.ToString())) + ")";
+        }
+
+        private static IEnumerable<object[]> BuildGetConfigurationsArgumentVariants(
+            ParameterInfo[] ps,
+            int folderId,
+            int latestVaultVersion,
+            string currentRevision)
+        {
+            var n = ps.Length;
+            if (n == 0)
+            {
+                yield return Array.Empty<object>();
+                yield break;
+            }
+
+            var isRef = ps.Select(p => p.ParameterType.IsByRef).ToArray();
+
+            bool IsRefObj(int i)
+            {
+                if (!isRef[i])
+                {
+                    return false;
+                }
+
+                var et = ps[i].ParameterType.GetElementType();
+                return et == null || et == typeof(object);
+            }
+
+            bool IsRefInt(int i) =>
+                isRef[i] && ps[i].ParameterType.GetElementType() == typeof(int);
+
+            var cv = latestVaultVersion;
+
+            // (out/ref object) — 以 Vault 最新版號／修訂／null 嘗試，回傳 EdmStrLst5
+            if (n == 1 && isRef[0] && IsRefObj(0))
+            {
+                foreach (var boxed in EnumerateGetConfigurationsRefObjectCandidates(cv, currentRevision))
+                {
+                    yield return new object[] { boxed };
+                }
+
+                yield break;
+            }
+
+            // (int, out/ref object) — 第一參數為版次時僅試最新版
+            if (n == 2 && !isRef[0] && ps[0].ParameterType == typeof(int) && isRef[1] && IsRefObj(1))
+            {
+                yield return new object[] { cv, null };
+                yield break;
+            }
+
+            // (int folder, int ver, out/ref object)
+            if (n == 3 && !isRef[0] && !isRef[1] && isRef[2] && IsRefObj(2)
+                && ps[0].ParameterType == typeof(int) && ps[1].ParameterType == typeof(int))
+            {
+                yield return new object[] { folderId, cv, null };
+                yield break;
+            }
+
+            // (int) 回傳值
+            if (n == 1 && !isRef[0] && ps[0].ParameterType == typeof(int))
+            {
+                yield return new object[] { cv };
+                yield break;
+            }
+
+            // (object) 回傳值（少見）
+            if (n == 1 && !isRef[0] && ps[0].ParameterType == typeof(object))
+            {
+                yield return new object[] { cv };
+                yield break;
+            }
+
+            // (int, int) 回傳值
+            if (n == 2 && !isRef[0] && !isRef[1] && ps[0].ParameterType == typeof(int) && ps[1].ParameterType == typeof(int))
+            {
+                yield return new object[] { folderId, cv };
+                yield break;
+            }
+
+            // 泛用：僅 ref/out，object 填 null、int 填 0
+            if (isRef.All(x => x))
+            {
+                var a = new object[n];
+                for (var i = 0; i < n; i++)
+                {
+                    if (IsRefInt(i))
+                    {
+                        a[i] = 0;
+                    }
+                    else
+                    {
+                        a[i] = null;
+                    }
+                }
+
+                yield return a;
+            }
+        }
+
+        private static void TryConsumeReturnValueForConfigurationList(List<string> result, object ret)
+        {
+            if (ret == null)
+            {
+                return;
+            }
+
+            if (LooksLikeEdmStringList(ret))
+            {
+                TryAddStringsFromEdmStringList(result, ret);
+                return;
+            }
+
+            TryAddConfigNames(result, ret);
+        }
+
+        /// <summary>PDM 的 EdmStrLst5 在執行期可能是 __ComObject，不能只看型別名稱。</summary>
+        private static bool LooksLikeEdmStringList(object o)
+        {
+            if (o == null)
+            {
+                return false;
+            }
+
+            var t = o.GetType();
+            var fn = t.FullName ?? string.Empty;
+            var nm = t.Name ?? string.Empty;
+            if (fn.IndexOf("EdmStrLst", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                nm.IndexOf("EdmStrLst", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return true;
+            }
+
+            return t.GetMethod("GetHeadPosition", BindingFlags.Instance | BindingFlags.Public) != null
+                   && t.GetMethods(BindingFlags.Instance | BindingFlags.Public).Any(x => x.Name == "GetNext");
+        }
+
+        /// <summary>
+        /// EdmStrLst5Class 實作 <see cref="IEdmStrLst5"/> 等介面；公開方法在介面上，對 <c>GetType()</c> 取得的類別做
+        /// <c>GetMethod("GetHeadPosition")</c> 常為 null，必須以介面型別反射再 <c>Invoke(strLst, …)</c>。
+        /// </summary>
+        private static void TryAddStringsFromEdmStringListViaStrLstInterfaces(List<string> result, object strLst)
+        {
+            var asm = typeof(IEdmFile5).Assembly;
+            foreach (var ifaceName in new[]
+                     {
+                         "IEdmStrLst9", "IEdmStrLst8", "IEdmStrLst7", "IEdmStrLst6", "IEdmStrLst5"
+                     })
+            {
+                Type iface;
+                try
+                {
+                    iface = asm.GetType("EPDM.Interop.epdm." + ifaceName, false, false);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (iface == null || !iface.IsInstanceOfType(strLst))
+                {
+                    continue;
+                }
+
+                if (TryEnumerateIEdmStrLstHeadNext(result, strLst, iface))
+                {
+                    return;
+                }
+
+                if (TryEnumerateIEdmStrLstByCountAndItem(result, strLst, iface))
+                {
+                    return;
+                }
+            }
+        }
+
+        private static bool TryEnumerateIEdmStrLstHeadNext(List<string> result, object strLst, Type iface)
+        {
+            try
+            {
+                var getHead = iface.GetMethod(
+                    "GetHeadPosition",
+                    BindingFlags.Instance | BindingFlags.Public,
+                    binder: null,
+                    types: Type.EmptyTypes,
+                    modifiers: null);
+                if (getHead == null)
+                {
+                    return false;
+                }
+
+                var getNextMethods = iface.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .Where(m => string.Equals(m.Name, "GetNext", StringComparison.Ordinal))
+                    .ToList();
+                foreach (var getNext in getNextMethods)
+                {
+                    if (TryInvokeStrLstGetNextLoop(result, strLst, getHead, getNext, getNext.GetParameters()))
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return false;
+        }
+
+        private static bool TryInvokeStrLstGetNextLoop(
+            List<string> result,
+            object strLst,
+            MethodInfo getHead,
+            MethodInfo getNext,
+            ParameterInfo[] ps)
+        {
+            IEdmPos5 posArg = null;
+            try
+            {
+                posArg = getHead.Invoke(strLst, null) as IEdmPos5;
+                if (posArg == null || posArg.IsNull)
+                {
+                    return false;
+                }
+
+                // string GetNext(ref IEdmPos5 pos) — Interop 有時未標 IsByRef，單參數即嘗試
+                if (ps.Length == 1)
+                {
+                    var safety = 4096;
+                    while (posArg != null && !posArg.IsNull && safety-- > 0)
+                    {
+                        var argsN = new object[] { posArg };
+                        object sObj;
+                        try
+                        {
+                            sObj = getNext.Invoke(strLst, argsN);
+                        }
+                        catch
+                        {
+                            break;
+                        }
+
+                        var nextPos = argsN[0] as IEdmPos5;
+                        var s = sObj?.ToString()?.Trim();
+                        if (string.IsNullOrWhiteSpace(s))
+                        {
+                            if (nextPos == null || ReferenceEquals(posArg, nextPos) ||
+                                (nextPos is IEdmPos5 np && np.IsNull))
+                            {
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            result.Add(s);
+                        }
+
+                        if (!ReferenceEquals(posArg, nextPos))
+                        {
+                            ComHelper.Release(posArg);
+                        }
+
+                        posArg = nextPos;
+                    }
+
+                    return result.Count > 0;
+                }
+
+                // void GetNext(ref IEdmPos5 pos, out string psString) 等
+                if (ps.Length >= 2 && ps[1].IsOut)
+                {
+                    var safety = 4096;
+                    while (posArg != null && !posArg.IsNull && safety-- > 0)
+                    {
+                        var argsN = new object[] { posArg, null };
+                        try
+                        {
+                            getNext.Invoke(strLst, argsN);
+                        }
+                        catch
+                        {
+                            break;
+                        }
+
+                        var nextPos = argsN[0] as IEdmPos5;
+                        var s = argsN[1]?.ToString()?.Trim();
+                        if (string.IsNullOrWhiteSpace(s))
+                        {
+                            if (nextPos == null || ReferenceEquals(posArg, nextPos) ||
+                                (nextPos is IEdmPos5 np && np.IsNull))
+                            {
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            result.Add(s);
+                        }
+
+                        if (!ReferenceEquals(posArg, nextPos))
+                        {
+                            ComHelper.Release(posArg);
+                        }
+
+                        posArg = nextPos;
+                    }
+
+                    return result.Count > 0;
+                }
+            }
+            finally
+            {
+                ComHelper.Release(posArg);
+            }
+
+            return false;
+        }
+
+        private static bool TryEnumerateIEdmStrLstByCountAndItem(List<string> result, object strLst, Type iface)
+        {
+            try
+            {
+                var countProp = iface.GetProperty("Count", BindingFlags.Instance | BindingFlags.Public);
+                if (countProp == null)
+                {
+                    return false;
+                }
+
+                var cntObj = countProp.GetValue(strLst, null);
+                if (cntObj == null || !int.TryParse(cntObj.ToString(), out var cnt) || cnt <= 0)
+                {
+                    return false;
+                }
+
+                foreach (var propName in new[] { "Item", "Str", "String" })
+                {
+                    var indexer = iface.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                        .FirstOrDefault(p =>
+                            p.Name == propName
+                            && p.GetIndexParameters().Length == 1
+                            && p.GetIndexParameters()[0].ParameterType == typeof(int));
+                    if (indexer == null)
+                    {
+                        continue;
+                    }
+
+                    for (var i = 0; i < cnt; i++)
+                    {
+                        var v = indexer.GetValue(strLst, new object[] { i });
+                        var s = v?.ToString()?.Trim();
+                        if (!string.IsNullOrWhiteSpace(s))
+                        {
+                            result.Add(s);
+                        }
+                    }
+
+                    if (result.Count > 0)
+                    {
+                        return true;
+                    }
+                }
+
+                foreach (var methodName in new[] { "GetAt", "GetStr" })
+                {
+                    var gm = iface.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                        .FirstOrDefault(m => m.Name == methodName
+                                             && m.GetParameters().Length == 1
+                                             && m.GetParameters()[0].ParameterType == typeof(int));
+                    if (gm == null)
+                    {
+                        continue;
+                    }
+
+                    for (var i = 0; i < cnt; i++)
+                    {
+                        var v = gm.Invoke(strLst, new object[] { i });
+                        var s = v?.ToString()?.Trim();
+                        if (!string.IsNullOrWhiteSpace(s))
+                        {
+                            result.Add(s);
+                        }
+                    }
+
+                    if (result.Count > 0)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return false;
+        }
+
+        /// <summary>COM 上部分成員僅能透過執行期繫結呼叫。</summary>
+        private static void TryAddStringsFromEdmStringListDynamic(List<string> result, object strLst)
+        {
+            try
+            {
+                dynamic d = strLst;
+                dynamic pos = d.GetHeadPosition();
+                if (pos == null)
+                {
+                    return;
+                }
+
+                try
+                {
+                    if ((bool)pos.IsNull)
+                    {
+                        return;
+                    }
+                }
+                catch
+                {
+                    // 無 IsNull
+                }
+
+                var safety = 4096;
+                while (pos != null && safety-- > 0)
+                {
+                    try
+                    {
+                        if ((bool)pos.IsNull)
+                        {
+                            break;
+                        }
+                    }
+                    catch
+                    {
+                        // ignore
+                    }
+
+                    string s;
+                    try
+                    {
+                        s = d.GetNext(ref pos);
+                    }
+                    catch
+                    {
+                        break;
+                    }
+
+                    s = s?.Trim();
+                    if (string.IsNullOrWhiteSpace(s))
+                    {
+                        break;
+                    }
+
+                    result.Add(s);
+                }
+            }
+            catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException)
+            {
+                // 動態派發不支援此 COM 簽章
+            }
+            catch (System.Reflection.TargetInvocationException)
+            {
+                // ignore
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        /// <summary>自 PDM EdmStrLst5 / IEdmStrLst* 取出字串（反射，避免 interop 版次差異）。</summary>
+        private static void TryAddStringsFromEdmStringList(List<string> result, object strLst)
+        {
+            if (strLst == null)
+            {
+                return;
+            }
+
+            // EdmStrLst5Class 等方法定義在 IEdmStrLst* 上，對執行個體 CLR 型別 GetMethod 常拿不到，須先走介面反射。
+            TryAddStringsFromEdmStringListViaStrLstInterfaces(result, strLst);
+            if (result.Count > 0)
+            {
+                return;
+            }
+
+            TryAddStringsFromEdmStringListDynamic(result, strLst);
+            if (result.Count > 0)
+            {
+                return;
+            }
+
+            var t = strLst.GetType();
+
+            // 1) GetHeadPosition + GetNext(ref pos) — 執行個體型別上若可見則直接呼叫
+            try
+            {
+                var getHead = t.GetMethod(
+                    "GetHeadPosition",
+                    BindingFlags.Instance | BindingFlags.Public,
+                    binder: null,
+                    types: Type.EmptyTypes,
+                    modifiers: null);
+                var getNextMethods = t.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                    .Where(m => m.Name == "GetNext")
+                    .ToList();
+                if (getHead != null && getNextMethods.Count > 0)
+                {
+                    foreach (var getNext in getNextMethods)
+                    {
+                        var ps = getNext.GetParameters();
+                        if (ps.Length != 1 || !ps[0].ParameterType.IsByRef)
+                        {
+                            continue;
+                        }
+
+                        IEdmPos5 posArg = null;
+                        try
+                        {
+                            posArg = getHead.Invoke(strLst, null) as IEdmPos5;
+                            if (posArg == null || posArg.IsNull)
+                            {
+                                continue;
+                            }
+
+                            var safety = 4096;
+                            while (posArg != null && !posArg.IsNull && safety-- > 0)
+                            {
+                                var argsN = new object[] { posArg };
+                                object sObj;
+                                try
+                                {
+                                    sObj = getNext.Invoke(strLst, argsN);
+                                }
+                                catch
+                                {
+                                    break;
+                                }
+
+                                var nextPos = argsN[0] as IEdmPos5;
+                                var s = sObj?.ToString()?.Trim();
+                                if (string.IsNullOrWhiteSpace(s))
+                                {
+                                    if (nextPos == null || ReferenceEquals(posArg, nextPos) ||
+                                        (nextPos is IEdmPos5 np && np.IsNull))
+                                    {
+                                        break;
+                                    }
+                                }
+                                else
+                                {
+                                    result.Add(s);
+                                }
+
+                                if (!ReferenceEquals(posArg, nextPos))
+                                {
+                                    ComHelper.Release(posArg);
+                                }
+
+                                posArg = nextPos;
+                            }
+                        }
+                        finally
+                        {
+                            ComHelper.Release(posArg);
+                        }
+
+                        if (result.Count > 0)
+                        {
+                            return;
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // try next pattern
+            }
+
+            // 2) Count／MlCount／GetCount + 索引子或 GetAt
+            try
+            {
+                int cnt = -1;
+                foreach (var propName in new[] { "Count", "MlCount", "mbsCount" })
+                {
+                    var countProp = t.GetProperty(propName, BindingFlags.Instance | BindingFlags.Public);
+                    if (countProp == null)
+                    {
+                        continue;
+                    }
+
+                    var cntObj = countProp.GetValue(strLst, null);
+                    if (cntObj != null && int.TryParse(cntObj.ToString(), out var c) && c > 0)
+                    {
+                        cnt = c;
+                        break;
+                    }
+                }
+
+                if (cnt < 0)
+                {
+                    var getCount = t.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                        .FirstOrDefault(m => m.Name == "GetCount" && m.GetParameters().Length == 0);
+                    if (getCount != null)
+                    {
+                        var cntObj = getCount.Invoke(strLst, null);
+                        if (cntObj != null && int.TryParse(cntObj.ToString(), out var c) && c > 0)
+                        {
+                            cnt = c;
+                        }
+                    }
+                }
+
+                if (cnt > 0)
+                {
+                    foreach (var indexer in t.GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                        .Where(p => p.Name == "Item" || p.Name == "Str" || p.Name == "String"))
+                    {
+                        var ip = indexer.GetIndexParameters();
+                        if (ip.Length != 1 || ip[0].ParameterType != typeof(int))
+                        {
+                            continue;
+                        }
+
+                        for (var i = 0; i < cnt; i++)
+                        {
+                            var v = indexer.GetValue(strLst, new object[] { i });
+                            var s = v?.ToString()?.Trim();
+                            if (!string.IsNullOrWhiteSpace(s))
+                            {
+                                result.Add(s);
+                            }
+                        }
+
+                        if (result.Count > 0)
+                        {
+                            return;
+                        }
+                    }
+
+                    var getAt = t.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                        .Where(m => (m.Name == "GetAt" || m.Name == "GetStr") && m.GetParameters().Length == 1
+                                    && m.GetParameters()[0].ParameterType == typeof(int))
+                        .FirstOrDefault();
+                    if (getAt != null)
+                    {
+                        for (var i = 0; i < cnt; i++)
+                        {
+                            var v = getAt.Invoke(strLst, new object[] { i });
+                            var s = v?.ToString()?.Trim();
+                            if (!string.IsNullOrWhiteSpace(s))
+                            {
+                                result.Add(s);
+                            }
+                        }
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private static void TryAddConfigNames(List<string> result, object raw, int depth = 0)
+        {
+            if (raw == null || depth > 8)
+            {
+                return;
+            }
+
+            if (LooksLikeEdmStringList(raw))
+            {
+                TryAddStringsFromEdmStringList(result, raw);
+                if (result.Count > 0)
+                {
+                    return;
+                }
+            }
+
+            if (raw is string single && !string.IsNullOrWhiteSpace(single))
+            {
+                result.Add(single.Trim());
+                return;
+            }
+
+            if (raw is string[] sa)
+            {
+                foreach (var s in sa)
+                {
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        result.Add(s.Trim());
+                    }
+                }
+
+                return;
+            }
+
+            if (raw is object[] oa)
+            {
+                if (oa.Length == 1 && oa[0] != null)
+                {
+                    TryAddConfigNames(result, oa[0], depth + 1);
+                    if (result.Count > 0)
+                    {
+                        return;
+                    }
+                }
+
+                foreach (var o in oa)
+                {
+                    var s = o?.ToString();
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        result.Add(s.Trim());
+                    }
+                }
+
+                return;
+            }
+
+            if (raw is System.Collections.IEnumerable en && raw is not string)
+            {
+                foreach (var o in en)
+                {
+                    if (o is string ss && !string.IsNullOrWhiteSpace(ss))
+                    {
+                        result.Add(ss.Trim());
+                    }
+                    else if (o != null)
+                    {
+                        var s = o.ToString();
+                        if (!string.IsNullOrWhiteSpace(s))
+                        {
+                            result.Add(s.Trim());
+                        }
+                    }
+                }
+            }
+        }
+
+        private static string ReferencedAsForConfiguration(string fullPath, string configurationName)
+        {
+            var name = Path.GetFileName(fullPath ?? string.Empty);
+            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(configurationName))
+            {
+                return string.Empty;
+            }
+
+            return name + "<" + configurationName + ">";
+        }
+
+        /// <param name="progressWhileParsingMin">
+        /// 解析迴圈進度下限（含）。與 <paramref name="progressWhileParsingMax"/> 構成「本次抓取」內的 0～100 對應區段。
+        /// </param>
+        /// <param name="progressWhileParsingMax">
+        /// 解析迴圈進度上限（含）。最後一列會對應到此值，使整段解析在單次操作中為單調遞增的 0～100 體感。
+        /// </param>
+        private List<BomItem> BuildBomItemsFromComputedRows(
+            string assemblyPath,
+            object[] rows,
+            EdmBomColumn[] columns,
+            IReadOnlyList<string> cardVarNames,
+            bool includeRootBomItem,
+            int? maxBomLayerDepth,
+            string configurationName,
+            IProgress<ProgressInfo> progress,
+            int progressWhileParsingMin,
+            int progressWhileParsingMax,
+            CancellationToken cancellationToken)
+        {
+            var items = new List<BomItem>();
+            var levelCounters = new List<int>();
+            var rootSkipped = false;
+            var rootSkipTreeLevel = 0;
+            int? skipDescendantsWhileTRawGreaterThan = null;
+
+            for (var i = 0; i < rows.Length; i++)
+            {
+                try
+                {
+                cancellationToken.ThrowIfCancellationRequested();
+
+                var cellObj = rows[i];
+                var cell = cellObj as IEdmBomCell;
+                if (cell == null)
+                {
+                    ComHelper.Release(cellObj);
+                    continue;
+                }
+
+                try
+                {
+                    var path = SafeGetPathFromBomCell(cell, columns);
+                    if (string.IsNullOrWhiteSpace(path))
+                    {
+                        continue;
+                    }
+
+                    var tRaw = SafeGetTreeLevel(cell);
+
+                    if (!includeRootBomItem &&
+                        !rootSkipped &&
+                        IsSameAssemblyPath(path, assemblyPath))
+                    {
+                        rootSkipped = true;
+                        rootSkipTreeLevel = tRaw;
+                        continue;
+                    }
+
+                    var tAdj = rootSkipped ? tRaw - (rootSkipTreeLevel + 1) : tRaw;
+                    if (tAdj < 0)
+                    {
+                        continue;
+                    }
+
+                    var levelStr = AdvanceBomLevelString(levelCounters, tAdj);
+
+                    if (skipDescendantsWhileTRawGreaterThan != null &&
+                        tRaw > skipDescendantsWhileTRawGreaterThan.Value)
+                    {
+                        continue;
+                    }
+
+                    skipDescendantsWhileTRawGreaterThan = null;
+
+                    if (maxBomLayerDepth != null &&
+                        CountLevelSegments(levelStr) > maxBomLayerDepth.Value)
+                    {
+                        skipDescendantsWhileTRawGreaterThan = tRaw;
+                        continue;
+                    }
+
+                    IEdmFolder5 rowFolder = null;
+                    IEdmFile5 rowFile = null;
+                    try
+                    {
+                        rowFile = _vault.GetFileFromPath(path, out rowFolder);
+                        if (rowFile == null || rowFolder == null)
+                        {
+                            continue;
+                        }
+
+                        var referencedAs = ReferencedAsForConfiguration(path, configurationName);
+                        var item = BuildBomItem(levelStr, rowFile, path, referencedAs, cardVarNames);
+                        item.UsageCount = TryReadBomQuantity(cell, columns);
+
+                        if (includeRootBomItem &&
+                            string.Equals(levelStr, "1", StringComparison.Ordinal) &&
+                            IsSameAssemblyPath(path, assemblyPath))
+                        {
+                            item.UsageCount = null;
+                        }
+
+                        items.Add(item);
+                    }
+                    finally
+                    {
+                        ComHelper.Release(rowFile);
+                        ComHelper.Release(rowFolder);
+                    }
+                }
+                finally
+                {
+                    ComHelper.Release(cell);
+                }
+                }
+                finally
+                {
+                    // 勿用 items.Count % N：每 N 筆會從上限跳回低百分比，進度條會「縮回去」。
+                    // 以「列索引／總列數」線性對應到 [progressWhileParsingMin, progressWhileParsingMax]，單調遞增。
+                    var denom = Math.Max(1, rows.Length);
+                    var lo = Math.Max(0, Math.Min(100, progressWhileParsingMin));
+                    var hi = Math.Max(lo, Math.Min(100, progressWhileParsingMax));
+                    var span = hi - lo;
+                    var frac = (double)(i + 1) / denom;
+                    var scanPct = lo + (int)Math.Round(span * frac, MidpointRounding.AwayFromZero);
+                    if (scanPct < lo)
+                    {
+                        scanPct = lo;
+                    }
+
+                    if (scanPct > hi)
+                    {
+                        scanPct = hi;
+                    }
+
+                    var msg = items.Count > 0
+                        ? $"解析中（{i + 1}/{rows.Length}，{scanPct}%）：{items[items.Count - 1].FileName}"
+                        : $"掃描 BOM…（{i + 1}/{rows.Length}，{scanPct}%）";
+                    progress?.Report(new ProgressInfo(scanPct, msg));
+                }
+            }
+
+            return items;
+        }
+
+        private static string SafeGetPathFromBomCell(IEdmBomCell cell, EdmBomColumn[] columns)
+        {
+            try
+            {
+                var p = cell.GetPathName();
+                if (!string.IsNullOrWhiteSpace(p))
+                {
+                    return p.Trim();
+                }
+            }
+            catch
+            {
+                // fall through
+            }
+
+            if (columns == null)
+            {
+                return string.Empty;
+            }
+
+            foreach (var col in columns)
+            {
+                if (col.meType != EdmBomColumnType.EdmBomCol_Path)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    object val, compVal;
+                    string cfg;
+                    bool ro;
+                    cell.GetVar(col.mlVariableID, col.meType, out val, out compVal, out cfg, out ro);
+                    var s = val?.ToString() ?? compVal?.ToString() ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        return s.Trim();
+                    }
+                }
+                catch
+                {
+                    // try next
+                }
+            }
+
+            return string.Empty;
+        }
+
+        private static int SafeGetTreeLevel(IEdmBomCell cell)
+        {
+            try
+            {
+                return cell.GetTreeLevel();
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static bool IsSameAssemblyPath(string rowPath, string assemblyPath)
+        {
+            if (string.IsNullOrWhiteSpace(rowPath) || string.IsNullOrWhiteSpace(assemblyPath))
+            {
+                return false;
+            }
+
+            if (!rowPath.EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            var a = rowPath.Trim().TrimEnd('\\');
+            var b = assemblyPath.Trim().TrimEnd('\\');
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string AdvanceBomLevelString(List<int> counters, int treeLevel)
+        {
+            while (counters.Count > treeLevel + 1)
+            {
+                counters.RemoveAt(counters.Count - 1);
+            }
+
+            while (counters.Count < treeLevel + 1)
+            {
+                counters.Add(0);
+            }
+
+            counters[treeLevel]++;
+            return string.Join(".", counters.Take(treeLevel + 1));
+        }
+
+        private static int CountLevelSegments(string level)
+        {
+            if (string.IsNullOrWhiteSpace(level))
+            {
+                return 0;
+            }
+
+            return level.Split('.').Length;
+        }
+
+        private static int? TryReadBomQuantity(IEdmBomCell cell, EdmBomColumn[] columns)
+        {
+            if (columns == null)
+            {
+                return null;
+            }
+
+            foreach (var colType in new[]
+                     {
+                         EdmBomColumnType.EdmBomCol_RefCount,
+                         EdmBomColumnType.EdmBomCol_RefCountNoBomQty
+                     })
+            {
+                foreach (var col in columns)
+                {
+                    if (col.meType != colType)
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        object val, compVal;
+                        string cfg;
+                        bool ro;
+                        cell.GetVar(col.mlVariableID, col.meType, out val, out compVal, out cfg, out ro);
+                        var s = val?.ToString() ?? compVal?.ToString() ?? string.Empty;
+                        if (TryParseQuantityString(s, out var q))
+                        {
+                            return q;
+                        }
+                    }
+                    catch
+                    {
+                        // try next column
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static bool TryParseQuantityString(string text, out int quantity)
+        {
+            quantity = 0;
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                return false;
+            }
+
+            text = text.Trim();
+            if (int.TryParse(text, System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out quantity))
+            {
+                return true;
+            }
+
+            if (double.TryParse(text, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var d))
+            {
+                quantity = (int)Math.Round(d);
+                return true;
+            }
+
+            return false;
         }
 
         private static bool IsAsmOrPart(string fullPath)
@@ -488,13 +2061,6 @@ namespace PDMTools.Services
             return ext != null &&
                    (ext.Equals(".sldasm", StringComparison.OrdinalIgnoreCase) ||
                     ext.Equals(".sldprt", StringComparison.OrdinalIgnoreCase));
-        }
-
-        private static string GetParentLevelKey(string level)
-        {
-            if (string.IsNullOrWhiteSpace(level)) return "ROOT";
-            var idx = level.LastIndexOf('.');
-            return idx >= 0 ? level.Substring(0, idx) : "ROOT";
         }
 
         public async Task ExportToExcelAsync(
@@ -522,6 +2088,7 @@ namespace PDMTools.Services
                 var columns = new List<(string Header, Func<BomItem, string> Get)>();
 
                 columns.Add(("Level", b => b.Level)); // Level 永遠顯示
+                columns.Add(("Use Count", b => b.UsageCount.HasValue ? b.UsageCount.Value.ToString() : string.Empty));
 
                 if (ShowFixed("File Name"))               columns.Add(("File Name",               b => b.FileName));
                 if (ShowFixed("State"))                   columns.Add(("State",                   b => b.State));
@@ -602,56 +2169,85 @@ namespace PDMTools.Services
                 var result  = new List<BomItem>(bomItems.Count * 2);
                 var total   = bomItems.Count;
 
+                // 「顯示工程圖」：進度條獨立 0～100，與第一次抓取無關（不沿用 75～95 等舊區段）。
+                progress?.Report(new ProgressInfo(0, "正在搜尋工程圖…"));
+
+                if (total == 0)
+                {
+                    progress?.Report(new ProgressInfo(100, "無 BOM 列可處理。"));
+                    return (IReadOnlyList<BomItem>)result;
+                }
+
                 // 快取：baseName → 找到的工程圖原型（Level 空白，後續 Clone 時填入）
                 var foundCache    = new Dictionary<string, BomItem>(StringComparer.OrdinalIgnoreCase);
                 var notFoundCache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                 for (var i = 0; i < total; i++)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var item = bomItems[i];
-                    result.Add(item);
-
-                    if (item.IsDrawing) continue;
-
-                    var ext = Path.GetExtension(item.FileName);
-                    if (!ext.Equals(".sldasm", StringComparison.OrdinalIgnoreCase) &&
-                        !ext.Equals(".sldprt", StringComparison.OrdinalIgnoreCase))
-                        continue;
-
-                    var baseName      = Path.GetFileNameWithoutExtension(item.FileName);
-                    var drawingLevel  = item.Level + "-DRW";
-
-                    progress?.Report(new ProgressInfo(
-                        Math.Min(95, 75 + (int)(20.0 * i / total)),
-                        $"搜尋工程圖：{item.FileName}"));
-
-                    if (notFoundCache.Contains(baseName)) continue;
-
-                    BomItem drawingItem;
-                    if (foundCache.TryGetValue(baseName, out var proto))
+                    try
                     {
-                        drawingItem = CloneDrawingItem(proto, drawingLevel);
-                    }
-                    else
-                    {
-                        var proto2 = FindDrawingProto(item, baseName + ".SLDDRW", cardVarNames);
-                        if (proto2 != null)
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var item = bomItems[i];
+                        result.Add(item);
+
+                        if (item.IsDrawing)
                         {
-                            foundCache[baseName] = proto2;
-                            drawingItem = CloneDrawingItem(proto2, drawingLevel);
+                            continue;
+                        }
+
+                        var ext = Path.GetExtension(item.FileName);
+                        if (!ext.Equals(".sldasm", StringComparison.OrdinalIgnoreCase) &&
+                            !ext.Equals(".sldprt", StringComparison.OrdinalIgnoreCase))
+                        {
+                            continue;
+                        }
+
+                        var baseName      = Path.GetFileNameWithoutExtension(item.FileName);
+                        var drawingLevel  = item.Level + "-DRW";
+
+                        if (notFoundCache.Contains(baseName))
+                        {
+                            continue;
+                        }
+
+                        BomItem drawingItem;
+                        if (foundCache.TryGetValue(baseName, out var proto))
+                        {
+                            drawingItem = CloneDrawingItem(proto, drawingLevel);
                         }
                         else
                         {
-                            notFoundCache.Add(baseName);
-                            continue;
+                            var proto2 = FindDrawingProto(item, baseName + ".SLDDRW", cardVarNames);
+                            if (proto2 != null)
+                            {
+                                foundCache[baseName] = proto2;
+                                drawingItem = CloneDrawingItem(proto2, drawingLevel);
+                            }
+                            else
+                            {
+                                notFoundCache.Add(baseName);
+                                continue;
+                            }
                         }
-                    }
 
-                    result.Add(drawingItem);
+                        result.Add(drawingItem);
+                    }
+                    finally
+                    {
+                        var pct = (int)((100L * (i + 1) + total - 1) / total);
+                        if (pct > 100)
+                        {
+                            pct = 100;
+                        }
+
+                        var name = i < bomItems.Count ? bomItems[i].FileName : string.Empty;
+                        progress?.Report(new ProgressInfo(
+                            pct,
+                            $"搜尋工程圖（{i + 1}/{total}，{pct}%）：{name}"));
+                    }
                 }
 
-                progress?.Report(new ProgressInfo(96, $"工程圖搜尋完成。"));
+                progress?.Report(new ProgressInfo(100, "工程圖搜尋完成。"));
                 return (IReadOnlyList<BomItem>)result;
             }, cancellationToken);
         }
@@ -969,113 +2565,6 @@ namespace PDMTools.Services
             return string.Empty;
         }
 
-        private static IEdmReference5 GetReferenceTree(IEdmFile5 file, IEdmFolder5 folder)
-        {
-            try
-            {
-                return file.GetReferenceTree(folder.ID, file.CurrentVersion);
-            }
-            catch
-            {
-                return null;
-            }
-        }
-
-        private void TraverseReferenceNodes(
-            IEdmReference5 parentNode,
-            string parentLevelPrefix,
-            int parentLayer,
-            int? maxBomLayerDepth,
-            ICollection<BomItem> output,
-            ISet<string> ancestryPaths,
-            IReadOnlyList<string> cardVarNames,
-            IProgress<ProgressInfo> progress,
-            CancellationToken cancellationToken)
-        {
-            // parentLayer 已達最大層數 => 不再展開其子節點
-            if (maxBomLayerDepth != null && parentLayer >= maxBomLayerDepth.Value)
-                return;
-
-            var index = 1;
-            foreach (var node in EnumerateChildren(parentNode))
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-
-                var currentLayer = parentLayer + 1;
-                if (maxBomLayerDepth != null && currentLayer > maxBomLayerDepth.Value)
-                    return;
-
-                // parentLevelPrefix 為空時，第一層以「index」表示（避免多出一層點號）
-                var currentLevel = string.IsNullOrWhiteSpace(parentLevelPrefix)
-                    ? index.ToString()
-                    : $"{parentLevelPrefix}.{index}";
-                index++;
-
-                var path = TryGetPathFromReferenceNode(node);
-                if (string.IsNullOrWhiteSpace(path))
-                {
-                    ComHelper.Release(node);
-                    continue;
-                }
-
-                // 只防止循環參照，不做全域去重，保留每個節點在 BOM 的實際出現。
-                if (ancestryPaths.Contains(path))
-                {
-                    ComHelper.Release(node);
-                    continue;
-                }
-
-                IEdmFolder5 folder = null;
-                IEdmFile5 file = null;
-                IEdmReference5 childTree = null;
-                try
-                {
-                    file = _vault.GetFileFromPath(path, out folder);
-                    if (file == null || folder == null)
-                    {
-                        continue;
-                    }
-
-                    var item = BuildBomItem(currentLevel, file, path, node.ReferencedAs, cardVarNames);
-                    output.Add(item);
-                    progress?.Report(new ProgressInfo(
-                        percentage: Math.Min(70, 10 + (output.Count % 60)),
-                        message: $"解析中：{item.FileName}"));
-
-                    ancestryPaths.Add(path);
-                    try
-                    {
-                        // 以子檔案重新取得參考樹，避免某些版本 node 子節點無法完整展開。
-                        childTree = GetReferenceTree(file, folder);
-                        if (childTree != null)
-                        {
-                            TraverseReferenceNodes(
-                                childTree,
-                                currentLevel,
-                                currentLayer,
-                                maxBomLayerDepth,
-                                output,
-                                ancestryPaths,
-                                cardVarNames,
-                                progress,
-                                cancellationToken);
-                        }
-                    }
-                    finally
-                    {
-                        ancestryPaths.Remove(path);
-                    }
-                }
-                finally
-                {
-                    ComHelper.Release(childTree);
-                    ComHelper.Release(file);
-                    ComHelper.Release(folder);
-                    ComHelper.Release(node);
-                }
-            }
-        }
-
         private BomItem BuildBomItem(string level, IEdmFile5 file, string fullPath, string referencedAs = "", IReadOnlyList<string> cardVarNames = null)
         {
             var state = string.Empty;
@@ -1154,10 +2643,14 @@ namespace PDMTools.Services
                 ComHelper.Release(enumVar);
             }
 
+            var fn = Path.GetFileName(fullPath);
+            var isDrw = string.Equals(Path.GetExtension(fn ?? string.Empty), ".slddrw",
+                StringComparison.OrdinalIgnoreCase);
+
             return new BomItem
             {
                 Level = level,
-                FileName = Path.GetFileName(fullPath),
+                FileName = fn,
                 State = string.IsNullOrWhiteSpace(state) ? workflowState : state,
                 WorkflowState = workflowState,
                 Description = description,
@@ -1168,7 +2661,9 @@ namespace PDMTools.Services
                 DescriptionConfigUsed = descriptionConfigUsed,
                 PartNumberVarUsed = partNumberVarUsed,
                 PartNumberConfigUsed = partNumberConfigUsed,
-                CardVariables = cardVariables
+                CardVariables = cardVariables,
+                // 經計算 BOM 可能直接帶出 .SLDDRW 列（階層常帶「-DRW」）；與事後插入的工程圖列相同，須標記供 UI 藍底。
+                IsDrawing = isDrw
             };
         }
 
@@ -1250,53 +2745,6 @@ namespace PDMTools.Services
                     .Where(x => !string.IsNullOrWhiteSpace(x))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList();
-            }
-        }
-
-        private static IEnumerable<IEdmReference5> EnumerateChildren(IEdmReference5 parentNode)
-        {
-            string projectName = string.Empty;
-            IEdmPos5 pos;
-            try
-            {
-                pos = parentNode.GetFirstChildPosition(ref projectName, true, true, 0);
-            }
-            catch
-            {
-                yield break;
-            }
-
-            while (pos != null)
-            {
-                IEdmReference5 child;
-                try
-                {
-                    child = parentNode.GetNextChild(pos);
-                }
-                catch
-                {
-                    yield break;
-                }
-
-                if (child == null)
-                {
-                    break;
-                }
-
-                yield return child;
-            }
-        }
-
-        private static string TryGetPathFromReferenceNode(IEdmReference5 node)
-        {
-            try
-            {
-                var path = node.FoundPath;
-                return path ?? string.Empty;
-            }
-            catch
-            {
-                return string.Empty;
             }
         }
     }

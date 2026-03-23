@@ -23,7 +23,7 @@
     <TextBlock Grid.Row="0"
                Grid.ColumnSpan="2"
                Margin="0,0,0,8"
-               Text="請選擇 C:\CP-PDM 底下的組合件 (.sldasm)" />
+               Text="請選擇 C:\CP-PDM 底下的組合件 (.sldasm)。選檔後會載入該檔的組態清單，請從「組態」下拉選取（不需手動輸入名稱）。" />
 
     <TextBox x:Name="AssemblyPathTextBox"
              Grid.Row="1"
@@ -72,6 +72,20 @@
         <ComboBoxItem Content="定義B（不含根）" />
       </ComboBox>
 
+      <TextBlock Text="組態："
+                 Margin="10,0,0,0"
+                 VerticalAlignment="Center"
+                 Foreground="DimGray" />
+      <ComboBox x:Name="ConfigComboBox"
+                Width="220"
+                MinWidth="180"
+                Height="32"
+                Margin="6,0,0,0"
+                IsEditable="False"
+                IsTextSearchEnabled="True"
+                VerticalContentAlignment="Center"
+                ToolTip="選檔後由 PDM 讀取該組合件的組態清單（以 Vault 最新版為準）。預設會優先選取文件作用中組態；若 PDM 無法提供則依「預設」／Default 等備援。" />
+
       <TextBlock Text="最大層數："
                  Margin="10,0,0,0"
                  VerticalAlignment="Center"
@@ -95,12 +109,36 @@
                     Content="顯示工程圖"
                     IsEnabled="False"
                     Click="ShowDrawingsToggle_Click" />
-      <ProgressBar x:Name="ProgressBar"
-                   Width="220"
-                   Height="20"
-                   Margin="12,6,0,0"
-                   Minimum="0"
-                   Maximum="100" />
+      <!-- 作業進度：百分比固定顯示在列條右側（不隨填滿區移動） -->
+      <StackPanel Margin="12,4,0,0"
+                  VerticalAlignment="Top"
+                  Orientation="Vertical">
+        <TextBlock Text="作業進度"
+                   FontSize="11"
+                   Foreground="DimGray"
+                   Margin="0,0,0,4" />
+        <Grid MinWidth="260">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" MinWidth="180" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <ProgressBar x:Name="ProgressBar"
+                       Grid.Column="0"
+                       Height="20"
+                       Minimum="0"
+                       Maximum="100"
+                       VerticalAlignment="Center" />
+          <TextBlock x:Name="ProgressPercentTextBlock"
+                     Grid.Column="1"
+                     Text="0%"
+                     Width="42"
+                     Margin="10,0,0,0"
+                     VerticalAlignment="Center"
+                     TextAlignment="Right"
+                     Foreground="DimGray"
+                     FontSize="12" />
+        </Grid>
+      </StackPanel>
     </WrapPanel>
 
     <TextBlock x:Name="StatusTextBlock"
@@ -126,16 +164,23 @@
               GridLinesVisibility="All"
               HorizontalGridLinesBrush="#FFD8D8D8"
               VerticalGridLinesBrush="#FFD8D8D8"
-              AlternatingRowBackground="#FFF5F5F5"
+              AlternationCount="2"
               EnableRowVirtualization="True"
               EnableColumnVirtualization="True"
               ScrollViewer.HorizontalScrollBarVisibility="Auto"
               ScrollViewer.VerticalScrollBarVisibility="Auto"
               ScrollViewer.CanContentScroll="True">
-      <!-- 工程圖列（IsDrawing=True）以淡藍色底色顯示 -->
+      <!--
+        勿同時使用 AlternatingRowBackground：其會在自訂 RowStyle 之後套用，灰底會蓋掉工程圖藍底。
+        改以 AlternationCount + Trigger 手動做白／灰交錯，並把 IsDrawing 的 DataTrigger 放在最後（同屬性以較後者為準）。
+      -->
       <DataGrid.RowStyle>
         <Style TargetType="DataGridRow">
+          <Setter Property="Background" Value="White" />
           <Style.Triggers>
+            <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+              <Setter Property="Background" Value="#FFF5F5F5" />
+            </Trigger>
             <DataTrigger Binding="{Binding IsDrawing}" Value="True">
               <Setter Property="Background" Value="#FFD6EEFF" />
               <Setter Property="Foreground" Value="#FF003070" />
