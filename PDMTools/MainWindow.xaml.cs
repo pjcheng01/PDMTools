@@ -51,6 +51,9 @@ namespace PDMTools
 
         // 目前作用中的資料卡欄位清單（由設定視窗管理）
         private List<string> _activeCardVarNames = new List<string>();
+        // 使用者儲存的欄位組合清單
+        private List<ColumnPresetProfile> _columnProfiles = new List<ColumnPresetProfile>();
+        private string _lastUsedColumnProfileName = string.Empty;
 
         // ── 工程圖列相關狀態 ──────────────────────────────────────────────
         // 純零組件 BOM（不含工程圖列）；抓取後快取，用於 Toggle OFF 還原
@@ -73,9 +76,20 @@ namespace PDMTools
             _activeFixedColumns  = settings.HasFixedColumnsSetting
                 ? settings.SelectedFixedColumns
                 : null;   // null = 尚未設定，預設全顯示
+            _columnProfiles = (settings.ColumnProfiles ?? new List<ColumnPresetProfile>())
+                .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
+                .Select(p => new ColumnPresetProfile
+                {
+                    Name = p.Name,
+                    SelectedItems = (p.SelectedItems ?? new List<string>()).ToList()
+                })
+                .ToList();
+            _lastUsedColumnProfileName = settings.LastUsedProfileName ?? string.Empty;
+
+            var hasAppliedLastProfile = ApplyLastUsedColumnProfileIfAvailable();
 
             // 若尚未設定卡片變數，使用內建清單作為起始預設
-            if (_activeCardVarNames.Count == 0)
+            if (_activeCardVarNames.Count == 0 && !hasAppliedLastProfile)
             {
                 _activeCardVarNames = PdmBomExportService.GetOrderedCardVariableLabels().ToList();
             }
@@ -574,7 +588,7 @@ namespace PDMTools
                 .Where(x => allItems.Contains(x, StringComparer.OrdinalIgnoreCase))
                 .ToList();
 
-            var win = new ColumnSettingsWindow(allItems, currentSelected) { Owner = this };
+            var win = new ColumnSettingsWindow(allItems, currentSelected, _columnProfiles, _lastUsedColumnProfileName) { Owner = this };
 
             if (win.ShowDialog() != true)
             {
@@ -589,6 +603,15 @@ namespace PDMTools
                 .Where(x => fixedNamesSet.Contains(x)).ToList();
             _activeCardVarNames = win.OrderedSelectedItems
                 .Where(x => !fixedNamesSet.Contains(x)).ToList();
+            _columnProfiles = (win.UpdatedProfiles ?? new List<ColumnPresetProfile>())
+                .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
+                .Select(p => new ColumnPresetProfile
+                {
+                    Name = p.Name,
+                    SelectedItems = (p.SelectedItems ?? new List<string>()).ToList()
+                })
+                .ToList();
+            _lastUsedColumnProfileName = win.LastUsedProfileName ?? string.Empty;
 
             var colSettings = new ColumnSettings
             {
@@ -596,7 +619,9 @@ namespace PDMTools
                 SelectedFixedColumns = _activeFixedColumns,
                 // KnownVariables 直接用 Vault 完整列舉清單，確保下次啟動比對時不會誤報
                 // （不依賴 AllShownAvailableItems，避免固定欄名稱與卡片變數名稱重疊時漏記）
-                KnownVariables       = allCardVars.ToList()
+                KnownVariables       = allCardVars.ToList(),
+                ColumnProfiles       = _columnProfiles,
+                LastUsedProfileName  = _lastUsedColumnProfileName
             };
             colSettings.Save();
 
@@ -1029,6 +1054,31 @@ namespace PDMTools
                 return false;
             }
 
+            return true;
+        }
+
+        private bool ApplyLastUsedColumnProfileIfAvailable()
+        {
+            if (string.IsNullOrWhiteSpace(_lastUsedColumnProfileName) || _columnProfiles == null || _columnProfiles.Count == 0)
+                return false;
+
+            var profile = _columnProfiles.FirstOrDefault(p =>
+                string.Equals(p.Name, _lastUsedColumnProfileName, StringComparison.OrdinalIgnoreCase));
+            if (profile == null || profile.SelectedItems == null || profile.SelectedItems.Count == 0)
+                return false;
+
+            var fixedSet = new HashSet<string>(AllFixedColumnNames, StringComparer.OrdinalIgnoreCase);
+            var selectedItems = profile.SelectedItems
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+
+            var selectedFixed = selectedItems.Where(x => fixedSet.Contains(x)).ToList();
+            var selectedCard = selectedItems.Where(x => !fixedSet.Contains(x)).ToList();
+            if (selectedFixed.Count == 0 && selectedCard.Count == 0)
+                return false;
+
+            _activeFixedColumns = selectedFixed;
+            _activeCardVarNames = selectedCard;
             return true;
         }
 

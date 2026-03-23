@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace PDMTools.Models
@@ -29,6 +30,12 @@ namespace PDMTools.Models
         /// 用於啟動時偵測是否有新變數加入。
         /// </summary>
         public List<string> KnownVariables { get; set; } = new List<string>();
+
+        /// <summary>使用者儲存的欄位組合清單。</summary>
+        public List<ColumnPresetProfile> ColumnProfiles { get; set; } = new List<ColumnPresetProfile>();
+
+        /// <summary>上次使用（套用）的欄位組合名稱。</summary>
+        public string LastUsedProfileName { get; set; } = string.Empty;
 
         public bool IsEmpty => SelectedVariables == null || SelectedVariables.Count == 0;
 
@@ -65,11 +72,17 @@ namespace PDMTools.Models
                 var selected     = ExtractArray(json, "selected")     ?? new List<string>();
                 var known        = ExtractArray(json, "known")        ?? new List<string>();
                 var fixedColumns = ExtractArray(json, "fixedColumns"); // null = 尚未設定
+                var profileNames = ExtractArray(json, "profileNames") ?? new List<string>();
+                var profileData  = ExtractArray(json, "profileSelected") ?? new List<string>();
+                var lastUsed     = ExtractString(json, "lastUsedProfile") ?? string.Empty;
+                var profiles     = BuildProfiles(profileNames, profileData);
                 return new ColumnSettings
                 {
                     SelectedVariables  = selected,
                     KnownVariables     = known,
-                    SelectedFixedColumns = fixedColumns   // null 保留，讓程式預設全顯示
+                    SelectedFixedColumns = fixedColumns,   // null 保留，讓程式預設全顯示
+                    ColumnProfiles = profiles,
+                    LastUsedProfileName = lastUsed
                 };
             }
             catch
@@ -90,6 +103,12 @@ namespace PDMTools.Models
                     + BuildJsonStringArray(KnownVariables)
                     + ",\"fixedColumns\":"
                     + BuildJsonStringArray(SelectedFixedColumns ?? new List<string>())
+                    + ",\"profileNames\":"
+                    + BuildJsonStringArray((ColumnProfiles ?? new List<ColumnPresetProfile>()).Select(p => p?.Name ?? string.Empty))
+                    + ",\"profileSelected\":"
+                    + BuildJsonStringArray((ColumnProfiles ?? new List<ColumnPresetProfile>()).Select(p => JoinProfileColumns(p?.SelectedItems)))
+                    + ",\"lastUsedProfile\":"
+                    + BuildJsonString(LastUsedProfileName)
                     + "}";
                 File.WriteAllText(FilePath, json, Encoding.UTF8);
             }
@@ -114,6 +133,14 @@ namespace PDMTools.Models
             }
             sb.Append(']');
             return sb.ToString();
+        }
+
+        private static string BuildJsonString(string value)
+        {
+            var safe = (value ?? string.Empty)
+                .Replace("\\", "\\\\")
+                .Replace("\"", "\\\"");
+            return "\"" + safe + "\"";
         }
 
         /// <summary>從 JSON 物件字串中找到指定 key 對應的字串陣列。</summary>
@@ -142,6 +169,47 @@ namespace PDMTools.Models
             return ParseJsonStringArray(json.Substring(startIdx, endIdx - startIdx + 1));
         }
 
+        private static string ExtractString(string json, string key)
+        {
+            var search = "\"" + key + "\"";
+            var keyIdx = json.IndexOf(search, StringComparison.OrdinalIgnoreCase);
+            if (keyIdx < 0) return null;
+
+            var colonIdx = json.IndexOf(':', keyIdx + search.Length);
+            if (colonIdx < 0) return null;
+
+            var quoteStart = json.IndexOf('"', colonIdx + 1);
+            if (quoteStart < 0) return null;
+
+            var sb = new StringBuilder();
+            var escaped = false;
+            for (var i = quoteStart + 1; i < json.Length; i++)
+            {
+                var c = json[i];
+                if (escaped)
+                {
+                    sb.Append(c);
+                    escaped = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escaped = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    return sb.ToString();
+                }
+
+                sb.Append(c);
+            }
+
+            return null;
+        }
+
         private static List<string> ParseJsonStringArray(string json)
         {
             var result = new List<string>();
@@ -167,6 +235,40 @@ namespace PDMTools.Models
                 else if (inString)   { current.Append(c); }
             }
             return result;
+        }
+
+        private const char ProfileColumnSeparator = '\u001F';
+
+        private static string JoinProfileColumns(IEnumerable<string> values)
+        {
+            return string.Join(ProfileColumnSeparator.ToString(), values ?? Enumerable.Empty<string>());
+        }
+
+        private static List<string> SplitProfileColumns(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return new List<string>();
+            return raw.Split(new[] { ProfileColumnSeparator }, StringSplitOptions.None)
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToList();
+        }
+
+        private static List<ColumnPresetProfile> BuildProfiles(IReadOnlyList<string> names, IReadOnlyList<string> selectedData)
+        {
+            var profiles = new List<ColumnPresetProfile>();
+            var count = Math.Min(names?.Count ?? 0, selectedData?.Count ?? 0);
+            for (var i = 0; i < count; i++)
+            {
+                var name = names[i]?.Trim() ?? string.Empty;
+                if (string.IsNullOrEmpty(name)) continue;
+
+                profiles.Add(new ColumnPresetProfile
+                {
+                    Name = name,
+                    SelectedItems = SplitProfileColumns(selectedData[i] ?? string.Empty)
+                });
+            }
+
+            return profiles;
         }
     }
 }

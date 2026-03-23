@@ -5,6 +5,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using PDMTools.Models;
 
 namespace PDMTools
 {
@@ -14,6 +15,9 @@ namespace PDMTools
         private readonly List<string> _allAvailable = new List<string>(); // 完整可用清單
         private readonly ObservableCollection<string> _available  = new ObservableCollection<string>(); // 篩選後顯示
         private readonly ObservableCollection<string> _selected   = new ObservableCollection<string>(); // 已選（有序）
+        private readonly List<string> _allItems = new List<string>();
+        private readonly List<ColumnPresetProfile> _profiles = new List<ColumnPresetProfile>();
+        private string _activeProfileName = string.Empty;
 
         // ── 輸出屬性 ─────────────────────────────────────────────────────
 
@@ -22,6 +26,8 @@ namespace PDMTools
 
         /// <summary>確定後：右側清單中所有的變數名稱（供存入 KnownVariables）。</summary>
         public List<string> AllShownAvailableItems { get; private set; } = new List<string>();
+        public List<ColumnPresetProfile> UpdatedProfiles { get; private set; } = new List<ColumnPresetProfile>();
+        public string LastUsedProfileName { get; private set; } = string.Empty;
 
         // ── 建構子 ───────────────────────────────────────────────────────
 
@@ -29,9 +35,19 @@ namespace PDMTools
         /// <param name="currentSelected">目前已選欄位（依順序）</param>
         public ColumnSettingsWindow(
             IReadOnlyList<string> allItems,
-            IReadOnlyList<string> currentSelected)
+            IReadOnlyList<string> currentSelected,
+            IReadOnlyList<ColumnPresetProfile> profiles,
+            string lastUsedProfileName)
         {
             InitializeComponent();
+            _allItems.AddRange((allItems ?? new List<string>()).ToList());
+            _profiles.AddRange((profiles ?? new List<ColumnPresetProfile>())
+                .Where(p => p != null && !string.IsNullOrWhiteSpace(p.Name))
+                .Select(p => new ColumnPresetProfile
+                {
+                    Name = p.Name,
+                    SelectedItems = (p.SelectedItems ?? new List<string>()).ToList()
+                }));
 
             var selectedSet = new HashSet<string>(
                 currentSelected ?? new List<string>(),
@@ -51,6 +67,8 @@ namespace PDMTools
 
             SelectedList.ItemsSource  = _selected;
             AvailableList.ItemsSource = _available;
+            ReloadProfileCombo();
+            SelectProfile(lastUsedProfileName, keepNameInput: true);
             RefreshFilter();
             UpdateCount();
         }
@@ -130,6 +148,93 @@ namespace PDMTools
             UpdateCount();
         }
 
+        private void ProfileCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (ProfileCombo.SelectedItem is string name)
+            {
+                _activeProfileName = name;
+                ProfileNameBox.Text = name;
+            }
+        }
+
+        private void SaveProfile_Click(object sender, RoutedEventArgs e)
+        {
+            var name = (ProfileNameBox.Text ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(name))
+            {
+                MessageBox.Show(this, "請先輸入組合名稱。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var existing = _profiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (existing == null)
+            {
+                _profiles.Add(new ColumnPresetProfile
+                {
+                    Name = name,
+                    SelectedItems = _selected.ToList()
+                });
+            }
+            else
+            {
+                existing.SelectedItems = _selected.ToList();
+                existing.Name = name;
+            }
+
+            _activeProfileName = name;
+            ReloadProfileCombo();
+            SelectProfile(name, keepNameInput: true);
+            UpdateCount();
+        }
+
+        private void ApplyProfile_Click(object sender, RoutedEventArgs e)
+        {
+            var name = ProfileCombo.SelectedItem as string ?? (ProfileNameBox.Text ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(name))
+            {
+                MessageBox.Show(this, "請先選擇要套用的組合。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var profile = _profiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (profile == null)
+            {
+                MessageBox.Show(this, "找不到指定的欄位組合。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            ApplyProfileToLists(profile);
+            _activeProfileName = profile.Name;
+            SelectProfile(profile.Name, keepNameInput: true);
+            UpdateCount();
+        }
+
+        private void DeleteProfile_Click(object sender, RoutedEventArgs e)
+        {
+            var name = ProfileCombo.SelectedItem as string ?? (ProfileNameBox.Text ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(name))
+            {
+                MessageBox.Show(this, "請先選擇要刪除的組合。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var profile = _profiles.FirstOrDefault(p => string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (profile == null)
+            {
+                MessageBox.Show(this, "找不到指定的欄位組合。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            _profiles.Remove(profile);
+            if (string.Equals(_activeProfileName, profile.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                _activeProfileName = string.Empty;
+            }
+
+            ReloadProfileCombo();
+            ProfileNameBox.Text = string.Empty;
+        }
+
         // ── 雙擊快速移動 ────────────────────────────────────────────────
 
         private void AvailableList_DoubleClick(object sender, MouseButtonEventArgs e)
@@ -204,6 +309,17 @@ namespace PDMTools
 
             // KnownVariables 需要涵蓋「已選 + 可用」全部，才能在下次啟動時正確判斷是否有新增變數
             AllShownAvailableItems = _selected.Concat(_allAvailable).ToList();
+            UpdatedProfiles = _profiles
+                .Where(p => !string.IsNullOrWhiteSpace(p.Name))
+                .Select(p => new ColumnPresetProfile
+                {
+                    Name = p.Name.Trim(),
+                    SelectedItems = (p.SelectedItems ?? new List<string>())
+                        .Where(x => !string.IsNullOrWhiteSpace(x))
+                        .ToList()
+                })
+                .ToList();
+            LastUsedProfileName = _activeProfileName ?? string.Empty;
 
             DialogResult = true;
         }
@@ -211,6 +327,64 @@ namespace PDMTools
         private void Cancel_Click(object sender, RoutedEventArgs e)
         {
             DialogResult = false;
+        }
+
+        private void ReloadProfileCombo()
+        {
+            var names = _profiles
+                .Select(p => p.Name)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            ProfileCombo.ItemsSource = names;
+        }
+
+        private void SelectProfile(string profileName, bool keepNameInput)
+        {
+            if (!string.IsNullOrWhiteSpace(profileName))
+            {
+                var hit = (ProfileCombo.ItemsSource as IEnumerable<string>)
+                    ?.FirstOrDefault(x => string.Equals(x, profileName, StringComparison.OrdinalIgnoreCase));
+                ProfileCombo.SelectedItem = hit;
+                _activeProfileName = hit ?? string.Empty;
+                if (keepNameInput && !string.IsNullOrWhiteSpace(hit))
+                {
+                    ProfileNameBox.Text = hit;
+                }
+            }
+            else
+            {
+                ProfileCombo.SelectedItem = null;
+                _activeProfileName = string.Empty;
+                if (!keepNameInput)
+                {
+                    ProfileNameBox.Text = string.Empty;
+                }
+            }
+        }
+
+        private void ApplyProfileToLists(ColumnPresetProfile profile)
+        {
+            var selected = (profile?.SelectedItems ?? new List<string>())
+                .Where(x => _allItems.Contains(x, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
+            _selected.Clear();
+            foreach (var item in selected)
+            {
+                _selected.Add(item);
+            }
+
+            _allAvailable.Clear();
+            foreach (var item in _allItems)
+            {
+                if (!selected.Contains(item, StringComparer.OrdinalIgnoreCase))
+                {
+                    _allAvailable.Add(item);
+                }
+            }
+            _allAvailable.Sort(StringComparer.OrdinalIgnoreCase);
+            RefreshFilter();
         }
     }
 }
