@@ -65,6 +65,7 @@
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
       <RowDefinition Height="*" MinHeight="120" />
     </Grid.RowDefinitions>
     <Grid.ColumnDefinitions>
@@ -75,7 +76,7 @@
     <TextBlock Grid.Row="0"
                Grid.ColumnSpan="2"
                Margin="0,0,0,8"
-               Text="請選擇 C:\CP-PDM 底下的組合件 (.sldasm)。選檔後會載入該檔的組態清單，請從「組態」下拉選取（不需手動輸入名稱）。" />
+               Text="請先指定組合件 (.sldasm) 路徑，再於下方選擇作業模式：Vault BOM（會載入組態）或參考稽核。" />
 
     <TextBox x:Name="AssemblyPathTextBox"
              Grid.Row="1"
@@ -93,7 +94,30 @@
             Content="導入文件"
             Click="BrowseButton_OnClick" />
 
-    <WrapPanel Grid.Row="2"
+    <StackPanel Grid.Row="2"
+                Grid.ColumnSpan="2"
+                Margin="0,10,0,0"
+                Orientation="Horizontal">
+      <TextBlock Text="作業模式："
+                 VerticalAlignment="Center"
+                 Foreground="DimGray"
+                 Margin="0,0,8,0" />
+      <RadioButton x:Name="BomModeRadioButton"
+                   Content="Vault BOM"
+                   IsChecked="True"
+                   GroupName="MainMode"
+                   VerticalAlignment="Center"
+                   Checked="MainModeRadioButton_OnChecked" />
+      <RadioButton x:Name="ReferenceAuditModeRadioButton"
+                   Content="參考稽核"
+                   GroupName="MainMode"
+                   Margin="16,0,0,0"
+                   VerticalAlignment="Center"
+                   Checked="MainModeRadioButton_OnChecked" />
+    </StackPanel>
+
+    <WrapPanel x:Name="BomOperationsPanel"
+               Grid.Row="3"
                 Grid.ColumnSpan="2"
                 Margin="0,14,0,0"
                 Orientation="Horizontal">
@@ -201,63 +225,146 @@
     </WrapPanel>
 
     <TextBlock x:Name="StatusTextBlock"
-               Grid.Row="3"
+               Grid.Row="4"
                Grid.ColumnSpan="2"
                Margin="0,10,0,8"
                TextWrapping="Wrap"
                Foreground="DimGray"
                Text="就緒" />
 
-    <!-- 欄位多時以橫向捲軸瀏覽；列多時以縱向捲軸（DataGrid 內建） -->
-    <DataGrid x:Name="BomDataGrid"
-              Grid.Row="4"
-              Grid.ColumnSpan="2"
-              MinHeight="200"
-              Margin="0,0,0,0"
-              IsReadOnly="True"
-              AutoGenerateColumns="False"
-              CanUserAddRows="False"
-              CanUserDeleteRows="False"
-              SelectionMode="Extended"
-              HeadersVisibility="Column"
-              GridLinesVisibility="All"
-              HorizontalGridLinesBrush="#FFD8D8D8"
-              VerticalGridLinesBrush="#FFD8D8D8"
-              AlternationCount="2"
-              EnableRowVirtualization="True"
-              EnableColumnVirtualization="True"
-              ColumnHeaderStyle="{StaticResource BomDataGridColumnHeaderStyle}"
-              PreviewMouseRightButtonDown="BomDataGrid_OnPreviewMouseRightButtonDown"
-              ScrollViewer.HorizontalScrollBarVisibility="Auto"
-              ScrollViewer.VerticalScrollBarVisibility="Auto"
-              ScrollViewer.CanContentScroll="True">
-      <!--
-        勿同時使用 AlternatingRowBackground：其會在自訂 RowStyle 之後套用，灰底會蓋掉工程圖藍底。
-        改以 AlternationCount + Trigger 手動做白／灰交錯，並把 IsDrawing 的 DataTrigger 放在最後（同屬性以較後者為準）。
-      -->
-      <DataGrid.RowStyle>
-        <Style TargetType="DataGridRow">
-          <Setter Property="Background" Value="White" />
-          <Style.Triggers>
-            <Trigger Property="ItemsControl.AlternationIndex" Value="1">
-              <Setter Property="Background" Value="#FFF5F5F5" />
-            </Trigger>
-            <DataTrigger Binding="{Binding IsDrawing}" Value="True">
-              <Setter Property="Background" Value="#FFD6EEFF" />
-              <Setter Property="Foreground" Value="#FF003070" />
-            </DataTrigger>
-          </Style.Triggers>
-        </Style>
-      </DataGrid.RowStyle>
-      <DataGrid.ContextMenu>
-        <ContextMenu>
-          <MenuItem Header="複製儲存格"
-                    Click="CopyCurrentCellMenuItem_OnClick" />
-          <MenuItem Header="選取文字模式"
-                    Click="OpenTextSelectionModeMenuItem_OnClick" />
-        </ContextMenu>
-      </DataGrid.ContextMenu>
-      <!-- 欄位於程式碼中建立，與 Excel 匯出一致 -->
-    </DataGrid>
+    <Grid Grid.Row="5"
+          Grid.ColumnSpan="2"
+          MinHeight="200"
+          Margin="0,0,0,0">
+      <Grid x:Name="BomModeContentPanel"
+            Visibility="Visible">
+        <DataGrid x:Name="BomDataGrid"
+                  MinHeight="200"
+                  Margin="0,4,0,0"
+                  IsReadOnly="True"
+                  AutoGenerateColumns="False"
+                  CanUserAddRows="False"
+                  CanUserDeleteRows="False"
+                  SelectionMode="Extended"
+                  HeadersVisibility="Column"
+                  GridLinesVisibility="All"
+                  HorizontalGridLinesBrush="#FFD8D8D8"
+                  VerticalGridLinesBrush="#FFD8D8D8"
+                  AlternationCount="2"
+                  EnableRowVirtualization="True"
+                  EnableColumnVirtualization="True"
+                  ColumnHeaderStyle="{StaticResource BomDataGridColumnHeaderStyle}"
+                  PreviewMouseRightButtonDown="BomDataGrid_OnPreviewMouseRightButtonDown"
+                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                  ScrollViewer.VerticalScrollBarVisibility="Auto"
+                  ScrollViewer.CanContentScroll="True">
+          <!--
+            勿同時使用 AlternatingRowBackground：其會在自訂 RowStyle 之後套用，灰底會蓋掉工程圖藍底。
+            改以 AlternationCount + Trigger 手動做白／灰交錯，並把 IsDrawing 的 DataTrigger 放在最後（同屬性以較後者為準）。
+          -->
+          <DataGrid.RowStyle>
+            <Style TargetType="DataGridRow">
+              <Setter Property="Background" Value="White" />
+              <Style.Triggers>
+                <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                  <Setter Property="Background" Value="#FFF5F5F5" />
+                </Trigger>
+                <DataTrigger Binding="{Binding IsDrawing}" Value="True">
+                  <Setter Property="Background" Value="#FFD6EEFF" />
+                  <Setter Property="Foreground" Value="#FF003070" />
+                </DataTrigger>
+              </Style.Triggers>
+            </Style>
+          </DataGrid.RowStyle>
+          <DataGrid.ContextMenu>
+            <ContextMenu>
+              <MenuItem Header="複製儲存格"
+                        Click="CopyCurrentCellMenuItem_OnClick" />
+              <MenuItem Header="選取文字模式"
+                        Click="OpenTextSelectionModeMenuItem_OnClick" />
+            </ContextMenu>
+          </DataGrid.ContextMenu>
+        </DataGrid>
+      </Grid>
+      <Grid x:Name="ReferenceAuditModeContentPanel"
+            Visibility="Collapsed"
+            Margin="0,4,0,0">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+          </Grid.RowDefinitions>
+          <WrapPanel Grid.Row="0" Orientation="Horizontal">
+            <Button x:Name="RunReferenceAuditButton"
+                    Width="96"
+                    Height="28"
+                    Margin="0,0,0,0"
+                    Content="開始稽核"
+                    Click="RunReferenceAuditButton_OnClick" />
+            <Button x:Name="ExportReferenceAuditButton"
+                    Width="120"
+                    Height="28"
+                    Margin="10,0,0,0"
+                    Content="匯出稽核 xlsx"
+                    Click="ExportReferenceAuditButton_OnClick"
+                    IsEnabled="False" />
+            <TextBlock Text="（使用上方同一個組合件路徑）"
+                       VerticalAlignment="Center"
+                       Foreground="DimGray"
+                       Margin="10,0,0,0" />
+          </WrapPanel>
+          <StackPanel Grid.Row="1"
+                      Orientation="Horizontal"
+                      Margin="0,8,0,4">
+            <TextBlock Text="預覽篩選："
+                       VerticalAlignment="Center"
+                       Margin="0,0,8,0" />
+            <ComboBox x:Name="ReferenceAuditPreviewFilterComboBox"
+                      MinWidth="280"
+                      Width="320"
+                      Height="28"
+                      VerticalContentAlignment="Center"
+                      SelectionChanged="ReferenceAuditPreviewFilterComboBox_OnSelectionChanged">
+              <ComboBoxItem Content="全部顯示"
+                            IsSelected="True" />
+              <ComboBoxItem Content="僅 Vault 根目錄內（IsUnderVaultRoot）" />
+              <ComboBoxItem Content="僅非 Vault 根目錄下" />
+              <ComboBoxItem Content="僅檔案不存在（路徑無效或遺失）" />
+              <ComboBoxItem Content="僅 S:\ 資料夾（路徑在 S 槽下）" />
+              <ComboBoxItem Content="僅非 S:\（不含 S 槽路徑）" />
+            </ComboBox>
+            <TextBlock x:Name="ReferenceAuditPreviewCountTextBlock"
+                       Margin="14,0,0,0"
+                       VerticalAlignment="Center"
+                       Foreground="DimGray"
+                       FontSize="12"
+                       Text="預覽：—" />
+          </StackPanel>
+          <TextBlock Grid.Row="2"
+                     Margin="0,0,0,6"
+                     FontSize="11"
+                     Foreground="DimGray"
+                     TextWrapping="Wrap"
+                     Text="以 SolidWorks API 遞迴展開單一 .sldasm（可為 Vault 外路徑）。「在 Vault 內」以 C:\CP-PDM 為判斷根目錄；預覽可篩選（含 S:\ 路徑）。匯出稽核 xlsx 僅包含「目前預覽篩選後」的列。請在本機已安裝 SolidWorks 下執行。" />
+          <DataGrid x:Name="ReferenceAuditDataGrid"
+                    Grid.Row="3"
+                    MinHeight="160"
+                    Margin="0,0,0,0"
+                    IsReadOnly="True"
+                    AutoGenerateColumns="True"
+                    CanUserAddRows="False"
+                    CanUserDeleteRows="False"
+                    SelectionMode="Extended"
+                    HeadersVisibility="Column"
+                    GridLinesVisibility="All"
+                    HorizontalGridLinesBrush="#FFD8D8D8"
+                    VerticalGridLinesBrush="#FFD8D8D8"
+                    AlternationCount="2"
+                    EnableRowVirtualization="True"
+                    ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                    ScrollViewer.VerticalScrollBarVisibility="Auto" />
+      </Grid>
+    </Grid>
   </Grid>
 </Window>

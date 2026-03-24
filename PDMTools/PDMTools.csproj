@@ -14,10 +14,18 @@
   <ItemGroup>
     <PackageReference Include="ClosedXML" Version="0.104.2" />
     <PackageReference Include="SolidWorks.EPDM.Interop.epdm" Version="32.1.0" />
+    <!-- 型別中繼資料 NuGet；建置不需安裝 SW。修正 AssemblyDoc / OpenDoc6 之晚繫結 TYPE_E_ELEMENTNOTFOUND -->
+    <PackageReference Include="SolidWorks.Interop.sldworks" Version="32.1.0" />
   </ItemGroup>
 
   <!-- dynamic / RuntimeBinder（TryAddStringsFromEdmStringListDynamic） -->
   <ItemGroup>
     <Reference Include="Microsoft.CSharp" />
+  </ItemGroup>
+
+  <!-- 本機備份／重複檔名（*-PJCHENG-MSI*）勿納入編譯，否則 CS0101/CS0111 -->
+  <ItemGroup>
+    <Compile Remove="**/*PJCHENG*" />
+    <Page Remove="**/*PJCHENG*" />
   </ItemGroup>
 </Project>

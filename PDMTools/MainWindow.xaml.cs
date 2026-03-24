@@ -25,6 +25,8 @@ namespace PDMTools
     public partial class MainWindow : Window
     {
         private const string VaultRootPath = @"C:\CP-PDM";
+        /// <summary>參考稽核預覽篩選：路徑是否落在 S 槽（不區分大小寫）。</summary>
+        private const string ReferenceAuditSDriveFolderPrefix = @"S:\";
         private PdmBomExportService _exportService;
         private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
         private readonly ObservableCollection<BomItem> _bomItems = new ObservableCollection<BomItem>();
@@ -36,6 +38,28 @@ namespace PDMTools
         private Popup _inlineTextSelectionPopup;
         private TextBox _inlineTextSelectionTextBox;
         private DataGridCell _inlineTextSelectionCell;
+
+        private readonly ObservableCollection<ReferenceAuditRow> _auditRows = new ObservableCollection<ReferenceAuditRow>();
+        private readonly SolidWorksReferenceAuditService _referenceAuditService = new SolidWorksReferenceAuditService();
+        private ICollectionView _auditRowsView;
+        private ReferenceAuditPreviewFilterMode _auditPreviewFilterMode = ReferenceAuditPreviewFilterMode.All;
+        private MainWorkMode _currentWorkMode = MainWorkMode.Bom;
+
+        private enum ReferenceAuditPreviewFilterMode
+        {
+            All = 0,
+            InVaultOnly = 1,
+            NotInVaultOnly = 2,
+            FileMissingOnly = 3,
+            UnderSDriveOnly = 4,
+            NotUnderSDriveOnly = 5
+        }
+
+        private enum MainWorkMode
+        {
+            Bom = 0,
+            ReferenceAudit = 1
+        }
 
         // ── 固定欄位定義（Level 不在此列，永遠顯示）──────────────────────
         private static readonly IReadOnlyList<string> AllFixedColumnNames = new List<string>
@@ -69,6 +93,12 @@ namespace PDMTools
             _bomItemsView.Filter = FilterBomItem;
             _bomItems.CollectionChanged += BomItems_CollectionChanged;
             BomDataGrid.ItemsSource = _bomItemsView;
+            _auditRowsView = CollectionViewSource.GetDefaultView(_auditRows);
+            _auditRowsView.Filter = FilterReferenceAuditRow;
+            ReferenceAuditDataGrid.ItemsSource = _auditRowsView;
+            _auditRows.CollectionChanged += AuditRows_CollectionChanged;
+            UpdateAuditPreviewCountLabel();
+            ApplyMainModeUi(MainWorkMode.Bom);
 
             // 載入已存的欄位設定
             var settings = ColumnSettings.Load();
@@ -335,6 +365,28 @@ namespace PDMTools
 
         private async void BrowseButton_OnClick(object sender, RoutedEventArgs e)
         {
+            if (_currentWorkMode == MainWorkMode.ReferenceAudit)
+            {
+                var auditDialog = new OpenFileDialog
+                {
+                    Title = "選擇要稽核的組合件（可為 Vault 外路徑）",
+                    Filter = "SolidWorks Assembly (*.sldasm)|*.sldasm",
+                    CheckFileExists = true,
+                    Multiselect = false,
+                    InitialDirectory = Directory.Exists(VaultRootPath)
+                        ? VaultRootPath
+                        : Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+                };
+
+                if (auditDialog.ShowDialog(this) == true)
+                {
+                    SetAssemblyPathText(auditDialog.FileName, isImported: true);
+                    StatusTextBlock.Text = "已選擇稽核組合件。";
+                }
+
+                return;
+            }
+
             var candidatePath = (AssemblyPathTextBox.Text ?? string.Empty).Trim();
             if (!string.IsNullOrWhiteSpace(candidatePath))
             {
@@ -374,6 +426,227 @@ namespace PDMTools
             ClearAllFiltersSilently();
 
             await PopulateConfigurationComboForPathAsync(dialog.FileName);
+        }
+
+        private async void RunReferenceAuditButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            var raw = AssemblyPathTextBox.Text?.Trim().Trim('"') ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                MessageBox.Show(this, "請指定稽核用之 .sldasm 路徑。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            string path;
+            try
+            {
+                path = Path.GetFullPath(raw);
+            }
+            catch
+            {
+                MessageBox.Show(this, "路徑格式不正確。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (!File.Exists(path))
+            {
+                MessageBox.Show(this, "找不到檔案。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            if (!string.Equals(Path.GetExtension(path), ".sldasm", StringComparison.OrdinalIgnoreCase))
+            {
+                MessageBox.Show(this, "僅支援 .sldasm。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            SetUiBusy(true);
+            StatusTextBlock.Text = "正在以 SolidWorks 稽核引用…";
+            _auditRows.Clear();
+            ExportReferenceAuditButton.IsEnabled = false;
+            UpdateAuditPreviewCountLabel();
+
+            try
+            {
+                IReadOnlyList<ReferenceAuditRow> rows = null;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    rows = _referenceAuditService.AuditAssembly(path, VaultRootPath);
+                }, DispatcherPriority.Normal);
+
+                rows ??= Array.Empty<ReferenceAuditRow>();
+
+                foreach (var r in rows)
+                    _auditRows.Add(r);
+
+                var notInVault = rows.Count(r =>
+                    !r.IsUnderVaultRoot && !string.IsNullOrWhiteSpace(r.FullPath));
+                StatusTextBlock.Text =
+                    $"稽核完成，共 {rows.Count} 筆引用（其中 {notInVault} 筆路徑不在 Vault 根目錄 {VaultRootPath} 下）。";
+                ExportReferenceAuditButton.IsEnabled = rows.Count > 0;
+                _auditRowsView?.Refresh();
+                UpdateAuditPreviewCountLabel();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "稽核失敗", MessageBoxButton.OK, MessageBoxImage.Error);
+                StatusTextBlock.Text = "稽核失敗。";
+            }
+            finally
+            {
+                SetUiBusy(false);
+            }
+        }
+
+        private void MainModeRadioButton_OnChecked(object sender, RoutedEventArgs e)
+        {
+            var mode = ReferenceAuditModeRadioButton.IsChecked == true
+                ? MainWorkMode.ReferenceAudit
+                : MainWorkMode.Bom;
+            ApplyMainModeUi(mode);
+        }
+
+        private void ApplyMainModeUi(MainWorkMode mode)
+        {
+            _currentWorkMode = mode;
+            var isBomMode = mode == MainWorkMode.Bom;
+
+            if (BomOperationsPanel != null)
+                BomOperationsPanel.Visibility = isBomMode ? Visibility.Visible : Visibility.Collapsed;
+            if (BomModeContentPanel != null)
+                BomModeContentPanel.Visibility = isBomMode ? Visibility.Visible : Visibility.Collapsed;
+            if (ReferenceAuditModeContentPanel != null)
+                ReferenceAuditModeContentPanel.Visibility = isBomMode ? Visibility.Collapsed : Visibility.Visible;
+
+            if (BrowseButton != null)
+                BrowseButton.Content = isBomMode ? "導入文件" : "選擇檔案";
+
+            if (StatusTextBlock != null)
+                StatusTextBlock.Text = isBomMode
+                    ? (_bomItems.Count > 0 ? $"目前為 Vault BOM 模式（{_bomItems.Count} 筆）。" : "目前為 Vault BOM 模式。")
+                    : (_auditRows.Count > 0 ? $"目前為參考稽核模式（{_auditRows.Count} 筆）。" : "目前為參考稽核模式。");
+        }
+
+        private void ReferenceAuditPreviewFilterComboBox_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (sender is not ComboBox cb)
+                return;
+            var idx = cb.SelectedIndex;
+            if (idx < 0)
+                idx = 0;
+            var maxIdx = (int)ReferenceAuditPreviewFilterMode.NotUnderSDriveOnly;
+            _auditPreviewFilterMode = (ReferenceAuditPreviewFilterMode)Math.Min(idx, maxIdx);
+            _auditRowsView?.Refresh();
+            UpdateAuditPreviewCountLabel();
+        }
+
+        private void AuditRows_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(UpdateAuditPreviewCountLabel));
+        }
+
+        private bool FilterReferenceAuditRow(object item)
+        {
+            if (item is not ReferenceAuditRow row)
+                return false;
+            return _auditPreviewFilterMode switch
+            {
+                ReferenceAuditPreviewFilterMode.InVaultOnly => row.IsUnderVaultRoot,
+                ReferenceAuditPreviewFilterMode.NotInVaultOnly => !row.IsUnderVaultRoot,
+                ReferenceAuditPreviewFilterMode.FileMissingOnly => !row.FileExists,
+                ReferenceAuditPreviewFilterMode.UnderSDriveOnly => IsFullPathUnderPrefix(row.FullPath, ReferenceAuditSDriveFolderPrefix),
+                ReferenceAuditPreviewFilterMode.NotUnderSDriveOnly => !IsFullPathUnderPrefix(row.FullPath, ReferenceAuditSDriveFolderPrefix),
+                _ => true
+            };
+        }
+
+        /// <summary>完整路徑是否在指定根目錄下（不區分大小寫）；無路徑視為不在其下。</summary>
+        private static bool IsFullPathUnderPrefix(string fullPath, string rootPrefix)
+        {
+            if (string.IsNullOrWhiteSpace(fullPath) || string.IsNullOrWhiteSpace(rootPrefix))
+                return false;
+            var p = fullPath.Trim();
+            var root = rootPrefix.TrimEnd('\\', '/') + "\\";
+            return p.StartsWith(root, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(p.TrimEnd('\\', '/'), rootPrefix.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void UpdateAuditPreviewCountLabel()
+        {
+            if (ReferenceAuditPreviewCountTextBlock == null)
+                return;
+            var total = _auditRows.Count;
+            if (total == 0)
+            {
+                ReferenceAuditPreviewCountTextBlock.Text = "預覽：—";
+                return;
+            }
+
+            if (_auditRowsView == null)
+            {
+                ReferenceAuditPreviewCountTextBlock.Text = $"預覽：{total} 筆";
+                return;
+            }
+
+            var shown = _auditRowsView.Cast<object>().Count();
+            ReferenceAuditPreviewCountTextBlock.Text =
+                shown == total
+                    ? $"預覽：共 {total} 筆"
+                    : $"預覽：顯示 {shown} / 共 {total} 筆";
+        }
+
+        private void ExportReferenceAuditButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_auditRows.Count == 0)
+            {
+                MessageBox.Show(this, "請先執行稽核。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var toExport = GetFilteredReferenceAuditRowsForExport();
+            if (toExport.Count == 0)
+            {
+                MessageBox.Show(this,
+                    "目前預覽篩選下沒有任何列可匯出。請調整篩選條件，或改選「全部顯示」後再匯出。",
+                    "提醒",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+                return;
+            }
+
+            var saveDialog = new SaveFileDialog
+            {
+                Title = "儲存參考稽核報表（與目前預覽篩選一致）",
+                Filter = "Excel Workbook (*.xlsx)|*.xlsx",
+                FileName = $"ReferenceAudit_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
+                AddExtension = true,
+                OverwritePrompt = true
+            };
+
+            if (saveDialog.ShowDialog(this) != true)
+                return;
+
+            try
+            {
+                ReferenceAuditExcelExporter.Export(toExport, saveDialog.FileName);
+                MessageBox.Show(this,
+                    $"已匯出 {toExport.Count} 筆（與目前預覽篩選一致）：\n{saveDialog.FileName}",
+                    "完成",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "匯出失敗", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        /// <summary>取得目前預覽篩選後的稽核列（與 DataGrid 可見列一致）。</summary>
+        private List<ReferenceAuditRow> GetFilteredReferenceAuditRowsForExport()
+        {
+            if (_auditRowsView == null)
+                return _auditRows.ToList();
+            return _auditRowsView.Cast<ReferenceAuditRow>().ToList();
         }
 
         private async void StartGrabButton_OnClick(object sender, RoutedEventArgs e)
@@ -966,12 +1239,18 @@ namespace PDMTools
         private void SetUiBusy(bool isBusy)
         {
             BrowseButton.IsEnabled         = !isBusy;
-            StartGrabButton.IsEnabled      = !isBusy;
-            ExportButton.IsEnabled         = !isBusy;
-            ColumnSettingsButton.IsEnabled = !isBusy;
-            ClearFiltersButton.IsEnabled   = !isBusy && HasActiveFilters();
+            var isBomMode = _currentWorkMode == MainWorkMode.Bom;
+            StartGrabButton.IsEnabled      = !isBusy && isBomMode;
+            ExportButton.IsEnabled         = !isBusy && isBomMode;
+            ColumnSettingsButton.IsEnabled = !isBusy && isBomMode;
+            ClearFiltersButton.IsEnabled   = !isBusy && isBomMode && HasActiveFilters();
             // Toggle 只在有資料時才可操作，忙碌中一律禁用
-            ShowDrawingsToggle.IsEnabled   = !isBusy && _rawBomItems.Count > 0;
+            ShowDrawingsToggle.IsEnabled   = !isBusy && isBomMode && _rawBomItems.Count > 0;
+            RunReferenceAuditButton.IsEnabled = !isBusy && !isBomMode;
+            ExportReferenceAuditButton.IsEnabled = !isBusy && !isBomMode && _auditRows.Count > 0;
+            ReferenceAuditPreviewFilterComboBox.IsEnabled = !isBusy && !isBomMode;
+            BomModeRadioButton.IsEnabled = !isBusy;
+            ReferenceAuditModeRadioButton.IsEnabled = !isBusy;
             Mouse.OverrideCursor           = isBusy ? Cursors.Wait : null;
         }
 
