@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
+using System.Text.Json.Serialization;
 
 namespace PDMTools.Models
 {
@@ -30,6 +31,7 @@ namespace PDMTools.Models
         public int? UsageCount { get; set; }
 
         /// <summary>供預覽用：將非空白卡片變數濃縮為單一字串。</summary>
+        [JsonIgnore]
         public string CardVariablesDisplay
         {
             get

@@ -5,6 +5,7 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Collections;
 using System.IO;
+using System.Globalization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -20,12 +21,15 @@ using Microsoft.Win32;
 using PDMTools.Converters;
 using PDMTools.Models;
 using PDMTools.Services;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 
 namespace PDMTools
 {
     public partial class MainWindow : Window
     {
         private const string VaultRootPath = @"C:\CP-PDM";
+        /// <summary>與程式執行檔同層之下存放 JSON 快照的資料夾名稱。</summary>
+        private const string SnapshotLibraryFolderName = "PdmSnapshots";
         private const int MaxRecentAssemblyPaths = 12;
         private static readonly string RecentAssemblyPathsFilePath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -1789,6 +1793,16 @@ namespace PDMTools
                 ReferenceAuditModeRadioButton.IsEnabled = !isBusy;
             }
 
+            if (SaveProjectButton != null)
+            {
+                SaveProjectButton.IsEnabled = !isBusy;
+            }
+
+            if (LoadProjectButton != null)
+            {
+                LoadProjectButton.IsEnabled = !isBusy;
+            }
+
             if (ReloadConfigurationsButton != null)
             {
                 ReloadConfigurationsButton.IsEnabled = !isBusy && isBomMode && !_configurationLoadInProgress &&
@@ -2463,6 +2477,421 @@ namespace PDMTools
         private bool IsUiBusy()
         {
             return Mouse.OverrideCursor != null;
+        }
+
+        // ── 專案／快照檔（JSON）──────────────────────────────────────────
+
+        private static string GetSnapshotLibraryDirectoryPath() =>
+            Path.Combine(AppDomain.CurrentDomain.BaseDirectory, SnapshotLibraryFolderName);
+
+        private static void EnsureSnapshotLibraryDirectoryExists(string directoryPath)
+        {
+            if (string.IsNullOrWhiteSpace(directoryPath))
+            {
+                return;
+            }
+
+            Directory.CreateDirectory(directoryPath);
+        }
+
+        /// <summary>預設快照檔名：組合件主檔名 + 模式標籤（VaultBom／RefAudit）+ 本機時間戳。</summary>
+        private string BuildDefaultSnapshotFileName()
+        {
+            var raw = AssemblyPathTextBox?.Text?.Trim().Trim('"') ?? string.Empty;
+            var baseName = "組合件";
+            if (!string.IsNullOrWhiteSpace(raw))
+            {
+                try
+                {
+                    baseName = Path.GetFileNameWithoutExtension(Path.GetFullPath(raw));
+                }
+                catch
+                {
+                    baseName = "組合件";
+                }
+            }
+
+            foreach (var c in Path.GetInvalidFileNameChars())
+            {
+                baseName = baseName.Replace(c, '_');
+            }
+
+            baseName = baseName.Trim();
+            if (string.IsNullOrWhiteSpace(baseName))
+            {
+                baseName = "組合件";
+            }
+
+            if (baseName.Length > 120)
+            {
+                baseName = baseName.Substring(0, 120);
+            }
+
+            var modeTag = _currentWorkMode == MainWorkMode.Bom ? "VaultBom" : "RefAudit";
+            return $"{baseName}_{modeTag}_{DateTime.Now:yyyyMMdd_HHmmss}.json";
+        }
+
+        private static string FormatSnapshotLocalTime(DateTime savedAt)
+        {
+            if (savedAt == default)
+            {
+                return "（未知）";
+            }
+
+            var dt = savedAt.Kind == DateTimeKind.Utc ? savedAt.ToLocalTime() : savedAt;
+            return dt.ToString("F", CultureInfo.CurrentCulture);
+        }
+
+        private void SaveProjectButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            var snapDir = GetSnapshotLibraryDirectoryPath();
+            EnsureSnapshotLibraryDirectoryExists(snapDir);
+
+            var dlg = new SaveFileDialog
+            {
+                Title = "儲存專案快照",
+                Filter = "PDMTools 快照 (*.json)|*.json|所有檔案 (*.*)|*.*",
+                InitialDirectory = snapDir,
+                FileName = BuildDefaultSnapshotFileName(),
+                AddExtension = true,
+                OverwritePrompt = true
+            };
+
+            if (dlg.ShowDialog(this) != true)
+            {
+                return;
+            }
+
+            try
+            {
+                var doc = BuildProjectSnapshotDocument();
+                PdmProjectSnapshotSerializer.Save(doc, dlg.FileName);
+                MessageBox.Show(this, $"已儲存快照：\n{dlg.FileName}", "完成", MessageBoxButton.OK, MessageBoxImage.Information);
+                StatusTextBlock.Text = $"已儲存專案快照：{Path.GetFileName(dlg.FileName)}";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "儲存失敗", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void LoadProjectButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            var snapDir = GetSnapshotLibraryDirectoryPath();
+            EnsureSnapshotLibraryDirectoryExists(snapDir);
+
+            var dlg = new OpenFileDialog
+            {
+                Title = "開啟專案快照",
+                Filter = "PDMTools 快照 (*.json)|*.json|所有檔案 (*.*)|*.*",
+                InitialDirectory = snapDir
+            };
+
+            if (dlg.ShowDialog(this) != true)
+            {
+                return;
+            }
+
+            SetUiBusy(true);
+            try
+            {
+                var doc = PdmProjectSnapshotSerializer.Load(dlg.FileName);
+                await ApplyProjectSnapshotDocumentAsync(doc);
+                MessageBox.Show(this,
+                    $"已載入快照（儲存時間本機：{FormatSnapshotLocalTime(doc.SavedAtLocal)}）。",
+                    "完成",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "載入失敗", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            finally
+            {
+                SetUiBusy(false);
+            }
+        }
+
+        private PdmProjectSnapshotDocument BuildProjectSnapshotDocument()
+        {
+            var doc = new PdmProjectSnapshotDocument
+            {
+                FormatVersion = 1,
+                SavedAtLocal = DateTime.Now,
+                AssemblyPath = AssemblyPathTextBox.Text?.Trim() ?? string.Empty,
+                WorkMode = _currentWorkMode == MainWorkMode.Bom ? "Bom" : "ReferenceAudit"
+            };
+
+            if (_currentWorkMode == MainWorkMode.Bom)
+            {
+                doc.Bom = new BomSnapshotData
+                {
+                    BomLevelDefinitionIndex = BomLevelDefinitionComboBox?.SelectedIndex ?? 1,
+                    AllBomDepth = AllBomDepthCheckBox?.IsChecked == true,
+                    MaxBomDepthText = MaxBomDepthTextBox?.Text?.Trim() ?? "3",
+                    ConfigurationName = GetEffectiveConfigurationName(),
+                    ShowDrawingsChecked = ShowDrawingsToggle?.IsChecked,
+                    ActiveCardVarNames = _activeCardVarNames != null ? new List<string>(_activeCardVarNames) : new List<string>(),
+                    ActiveFixedColumns = _activeFixedColumns != null ? new List<string>(_activeFixedColumns) : null,
+                    Items = PdmProjectSnapshotSerializer.CloneBomItems(_bomItems),
+                    RawBomItems = PdmProjectSnapshotSerializer.CloneBomItems(_rawBomItems),
+                    BomItemsWithDrawings = _bomItemsWithDrawings != null
+                        ? PdmProjectSnapshotSerializer.CloneBomItems(_bomItemsWithDrawings)
+                        : null,
+                    ColumnFilters = BuildBomColumnFilterSnapshots()
+                };
+            }
+            else
+            {
+                doc.ReferenceAudit = new ReferenceAuditSnapshotData
+                {
+                    ReferenceAuditMaxDepthText = ReferenceAuditMaxDepthTextBox?.Text?.Trim() ?? "3",
+                    ReferenceAuditAllDepth = ReferenceAuditAllDepthCheckBox?.IsChecked == true,
+                    ReferenceAuditIncludeDrawings = ReferenceAuditIncludeDrawingsCheckBox?.IsChecked == true,
+                    PreviewFilterComboIndex = ReferenceAuditPreviewFilterComboBox?.SelectedIndex ?? 0,
+                    Rows = PdmProjectSnapshotSerializer.CloneReferenceAuditRows(_auditRows)
+                };
+            }
+
+            return doc;
+        }
+
+        private List<BomColumnFilterSnapshot> BuildBomColumnFilterSnapshots()
+        {
+            var list = new List<BomColumnFilterSnapshot>();
+            foreach (var kv in _columnFilters)
+            {
+                var st = kv.Value;
+                list.Add(new BomColumnFilterSnapshot
+                {
+                    Key = st.Key,
+                    SelectedValues = st.SelectedValues.OrderBy(x => x, StringComparer.OrdinalIgnoreCase).ToList(),
+                    SearchText = st.SearchText ?? string.Empty
+                });
+            }
+
+            return list;
+        }
+
+        private async Task ApplyProjectSnapshotDocumentAsync(PdmProjectSnapshotDocument doc)
+        {
+            if (doc == null)
+            {
+                throw new ArgumentNullException(nameof(doc));
+            }
+
+            var bomMode = !string.Equals(doc.WorkMode, "ReferenceAudit", StringComparison.OrdinalIgnoreCase);
+
+            SetAssemblyPathText(doc.AssemblyPath ?? string.Empty, isImported: false);
+
+            if (bomMode)
+            {
+                BomModeRadioButton.IsChecked = true;
+            }
+            else
+            {
+                ReferenceAuditModeRadioButton.IsChecked = true;
+            }
+
+            ApplyMainModeUi(bomMode ? MainWorkMode.Bom : MainWorkMode.ReferenceAudit);
+
+            if (doc.Bom != null)
+            {
+                ApplyBomSnapshotData(doc.Bom);
+            }
+            else
+            {
+                _bomItems.Clear();
+                _rawBomItems.Clear();
+                _bomItemsWithDrawings = null;
+                if (ShowDrawingsToggle != null)
+                {
+                    ShowDrawingsToggle.IsEnabled = false;
+                    ShowDrawingsToggle.IsChecked = false;
+                }
+
+                SetupBomDataGridColumns();
+            }
+
+            if (doc.ReferenceAudit != null)
+            {
+                ApplyReferenceAuditSnapshotData(doc.ReferenceAudit);
+            }
+            else
+            {
+                _auditRows.Clear();
+                if (ExportReferenceAuditButton != null)
+                {
+                    ExportReferenceAuditButton.IsEnabled = false;
+                }
+
+                _auditRowsView?.Refresh();
+                UpdateAuditPreviewCountLabel();
+            }
+
+            if (bomMode && doc.Bom != null && TryGetNormalizedAssemblyPathFromUi(out var np))
+            {
+                await PopulateConfigurationComboForPathAsync(np, showFailureDialogs: false);
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    var cfg = doc.Bom.ConfigurationName ?? string.Empty;
+                    if (!string.IsNullOrWhiteSpace(cfg))
+                    {
+                        ConfigComboBox.Text = cfg;
+                        foreach (var it in ConfigComboBox.Items)
+                        {
+                            var s = it as string ?? it?.ToString();
+                            if (string.Equals(s, cfg, StringComparison.OrdinalIgnoreCase))
+                            {
+                                ConfigComboBox.SelectedItem = it;
+                                break;
+                            }
+                        }
+                    }
+
+                    UpdateBomConfigurationUiState();
+                });
+            }
+
+            await Dispatcher.InvokeAsync(AutoSizeDataGridColumns, DispatcherPriority.Loaded);
+            StatusTextBlock.Text = $"已載入專案快照（儲存時間本機：{FormatSnapshotLocalTime(doc.SavedAtLocal)}）。";
+        }
+
+        private void ApplyBomSnapshotData(BomSnapshotData b)
+        {
+            if (b == null)
+            {
+                return;
+            }
+
+            _activeCardVarNames = b.ActiveCardVarNames != null ? new List<string>(b.ActiveCardVarNames) : new List<string>();
+            _activeFixedColumns = b.ActiveFixedColumns != null ? new List<string>(b.ActiveFixedColumns) : null;
+            if (_activeFixedColumns != null && _activeFixedColumns.Count == 0)
+            {
+                _activeFixedColumns = null;
+            }
+
+            if (BomLevelDefinitionComboBox != null)
+            {
+                BomLevelDefinitionComboBox.SelectedIndex = Math.Max(0, Math.Min(1, b.BomLevelDefinitionIndex));
+            }
+
+            if (AllBomDepthCheckBox != null)
+            {
+                AllBomDepthCheckBox.IsChecked = b.AllBomDepth;
+            }
+
+            if (MaxBomDepthTextBox != null && !string.IsNullOrWhiteSpace(b.MaxBomDepthText))
+            {
+                MaxBomDepthTextBox.Text = b.MaxBomDepthText;
+            }
+
+            UpdateDepthInputStates();
+
+            _rawBomItems = PdmProjectSnapshotSerializer.CloneBomItems(b.RawBomItems);
+            _bomItemsWithDrawings = b.BomItemsWithDrawings != null
+                ? PdmProjectSnapshotSerializer.CloneBomItems(b.BomItemsWithDrawings)
+                : null;
+
+            _bomItems.Clear();
+            foreach (var it in PdmProjectSnapshotSerializer.CloneBomItems(b.Items))
+            {
+                _bomItems.Add(it);
+            }
+
+            if (ShowDrawingsToggle != null)
+            {
+                ShowDrawingsToggle.IsEnabled = _rawBomItems.Count > 0;
+                ShowDrawingsToggle.IsChecked = b.ShowDrawingsChecked == true;
+            }
+
+            SetupBomDataGridColumns();
+            ApplyBomColumnFiltersFromSnapshot(b.ColumnFilters);
+            _bomItemsView?.Refresh();
+            UpdateFilterUiState();
+        }
+
+        private void ApplyBomColumnFiltersFromSnapshot(IReadOnlyList<BomColumnFilterSnapshot> filters)
+        {
+            if (filters == null || filters.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var f in filters)
+            {
+                if (!_columnFilters.TryGetValue(f.Key, out var st))
+                {
+                    continue;
+                }
+
+                var avail = st.AvailableValues;
+                var set = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var s in f.SelectedValues ?? new List<string>())
+                {
+                    if (avail.Contains(s))
+                    {
+                        set.Add(s);
+                    }
+                }
+
+                if (set.Count > 0)
+                {
+                    st.SelectedValues = set;
+                }
+                else if (avail.Count > 0)
+                {
+                    st.SelectedValues = new HashSet<string>(avail, StringComparer.Ordinal);
+                }
+
+                st.SearchText = f.SearchText ?? string.Empty;
+            }
+        }
+
+        private void ApplyReferenceAuditSnapshotData(ReferenceAuditSnapshotData r)
+        {
+            if (r == null)
+            {
+                return;
+            }
+
+            if (ReferenceAuditMaxDepthTextBox != null)
+            {
+                ReferenceAuditMaxDepthTextBox.Text = r.ReferenceAuditMaxDepthText ?? "3";
+            }
+
+            if (ReferenceAuditAllDepthCheckBox != null)
+            {
+                ReferenceAuditAllDepthCheckBox.IsChecked = r.ReferenceAuditAllDepth;
+            }
+
+            if (ReferenceAuditIncludeDrawingsCheckBox != null)
+            {
+                ReferenceAuditIncludeDrawingsCheckBox.IsChecked = r.ReferenceAuditIncludeDrawings;
+            }
+
+            _auditRows.Clear();
+            foreach (var row in PdmProjectSnapshotSerializer.CloneReferenceAuditRows(r.Rows))
+            {
+                _auditRows.Add(row);
+            }
+
+            if (ExportReferenceAuditButton != null)
+            {
+                ExportReferenceAuditButton.IsEnabled = _auditRows.Count > 0;
+            }
+
+            var maxIdx = (int)ReferenceAuditPreviewFilterMode.ExcludeDrawings;
+            var idx = Math.Max(0, Math.Min(maxIdx, r.PreviewFilterComboIndex));
+            if (ReferenceAuditPreviewFilterComboBox != null
+                && ReferenceAuditPreviewFilterComboBox.Items.Count > idx)
+            {
+                ReferenceAuditPreviewFilterComboBox.SelectedIndex = idx;
+            }
+
+            _auditRowsView?.Refresh();
+            UpdateAuditPreviewCountLabel();
         }
     }
 }

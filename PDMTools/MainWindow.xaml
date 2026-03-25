@@ -124,6 +124,20 @@
                    Margin="16,0,0,0"
                    VerticalAlignment="Center"
                    Checked="MainModeRadioButton_OnChecked" />
+      <Button x:Name="SaveProjectButton"
+              Width="110"
+              Height="28"
+              Margin="24,0,0,0"
+              Content="儲存專案快照…"
+              Click="SaveProjectButton_OnClick"
+              ToolTip="將目前畫面上的路徑、模式、表格資料與篩選狀態存成 JSON。預設儲存至程式目錄下的 PdmSnapshots 資料夾；檔名含組合件主檔名、模式標籤（VaultBom 或 RefAudit）與本機時間。" />
+      <Button x:Name="LoadProjectButton"
+              Width="110"
+              Height="28"
+              Margin="8,0,0,0"
+              Content="開啟專案快照…"
+              Click="LoadProjectButton_OnClick"
+              ToolTip="從 JSON 快照還原畫面（不需重新向 Vault／SolidWorks 抓取）。預設開啟程式目錄下的 PdmSnapshots 資料夾。" />
     </StackPanel>
 
     <WrapPanel x:Name="BomOperationsPanel"
