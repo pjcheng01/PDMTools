@@ -71,10 +71,11 @@
     <Grid.ColumnDefinitions>
       <ColumnDefinition Width="*" />
       <ColumnDefinition Width="Auto" />
+      <ColumnDefinition Width="Auto" />
     </Grid.ColumnDefinitions>
 
     <TextBlock Grid.Row="0"
-               Grid.ColumnSpan="2"
+               Grid.ColumnSpan="3"
                Margin="0,0,0,8"
                Text="請先指定組合件 (.sldasm) 路徑，再於下方選擇作業模式：Vault BOM（會載入組態）或參考稽核。" />
 
@@ -94,8 +95,17 @@
             Content="導入文件"
             Click="BrowseButton_OnClick" />
 
+    <Button x:Name="RecentPathsButton"
+            Grid.Row="1"
+            Grid.Column="2"
+            Width="96"
+            Height="30"
+            Margin="8,0,0,0"
+            Content="最近使用"
+            Click="RecentPathsButton_OnClick" />
+
     <StackPanel Grid.Row="2"
-                Grid.ColumnSpan="2"
+                Grid.ColumnSpan="3"
                 Margin="0,10,0,0"
                 Orientation="Horizontal">
       <TextBlock Text="作業模式："
@@ -118,7 +128,7 @@
 
     <WrapPanel x:Name="BomOperationsPanel"
                Grid.Row="3"
-                Grid.ColumnSpan="2"
+                Grid.ColumnSpan="3"
                 Margin="0,14,0,0"
                 Orientation="Horizontal">
       <Button x:Name="StartGrabButton"
@@ -126,6 +136,15 @@
               Height="32"
               Content="開始抓取"
               Click="StartGrabButton_OnClick" />
+      <TextBlock x:Name="BomConfigStatusTextBlock"
+                 MinWidth="120"
+                 MaxWidth="280"
+                 Margin="10,0,0,0"
+                 VerticalAlignment="Center"
+                 FontSize="11"
+                 TextWrapping="Wrap"
+                 Foreground="DimGray"
+                 Text="" />
       <Button x:Name="ExportButton"
               Width="120"
               Height="32"
@@ -150,6 +169,7 @@
                 Height="32"
                 Margin="10,0,0,0"
                 SelectedIndex="1"
+                SelectionChanged="BomLevelDefinitionComboBox_OnSelectionChanged"
                 VerticalContentAlignment="Center">
         <ComboBoxItem Content="定義A（含根）" />
         <ComboBoxItem Content="定義B（不含根）" />
@@ -164,10 +184,18 @@
                 MinWidth="180"
                 Height="32"
                 Margin="6,0,0,0"
-                IsEditable="False"
+                IsEditable="True"
                 IsTextSearchEnabled="True"
                 VerticalContentAlignment="Center"
-                ToolTip="選檔後由 PDM 讀取該組合件的組態清單（以 Vault 最新版為準）。預設會優先選取文件作用中組態；若 PDM 無法提供則依「預設」／Default 等備援。" />
+                SelectionChanged="ConfigComboBox_SelectionOrTextChanged"
+                ToolTip="選檔後由 PDM 讀取組態清單；可從清單選取，或在清單載入失敗時直接輸入組態名稱。預設會優先選取文件作用中組態。" />
+      <Button x:Name="ReloadConfigurationsButton"
+              Width="108"
+              Height="32"
+              Margin="8,0,0,0"
+              Content="重新載入組態"
+              Click="ReloadConfigurationsButton_OnClick"
+              ToolTip="依目前路徑向 PDM 重新讀取組態清單；若仍失敗可改用手動輸入組態名稱。" />
 
       <TextBlock Text="最大層數："
                  Margin="10,0,0,0"
@@ -183,7 +211,9 @@
                  Content="取所有層"
                  Margin="10,0,0,0"
                  VerticalAlignment="Center"
-                 IsChecked="False" />
+                 IsChecked="False"
+                 Checked="DepthAllCheckBox_OnCheckedChanged"
+                 Unchecked="DepthAllCheckBox_OnCheckedChanged" />
 
       <ToggleButton x:Name="ShowDrawingsToggle"
                     Width="120"
@@ -226,14 +256,14 @@
 
     <TextBlock x:Name="StatusTextBlock"
                Grid.Row="4"
-               Grid.ColumnSpan="2"
+               Grid.ColumnSpan="3"
                Margin="0,10,0,8"
                TextWrapping="Wrap"
                Foreground="DimGray"
                Text="就緒" />
 
     <Grid Grid.Row="5"
-          Grid.ColumnSpan="2"
+          Grid.ColumnSpan="3"
           MinHeight="200"
           Margin="0,0,0,0">
       <Grid x:Name="BomModeContentPanel"
@@ -254,6 +284,7 @@
                   EnableRowVirtualization="True"
                   EnableColumnVirtualization="True"
                   ColumnHeaderStyle="{StaticResource BomDataGridColumnHeaderStyle}"
+                  Sorting="BomDataGrid_OnSorting"
                   PreviewMouseRightButtonDown="BomDataGrid_OnPreviewMouseRightButtonDown"
                   ScrollViewer.HorizontalScrollBarVisibility="Auto"
                   ScrollViewer.VerticalScrollBarVisibility="Auto"
@@ -309,6 +340,11 @@
                     Content="匯出稽核 xlsx"
                     Click="ExportReferenceAuditButton_OnClick"
                     IsEnabled="False" />
+            <CheckBox x:Name="ReferenceAuditIncludeDrawingsCheckBox"
+                      Content="同資料夾搜尋工程圖 (.slddrw)"
+                      Margin="12,0,0,0"
+                      VerticalAlignment="Center"
+                      ToolTip="於每個引用到的 .sldprt／.sldasm 所在資料夾尋找同名工程圖並列入表（與 Vault BOM 工程圖搜尋「同資料夾」階段相同；不含 PDM 全庫搜尋）。" />
             <TextBlock Text="（使用上方同一個組合件路徑）"
                        VerticalAlignment="Center"
                        Foreground="DimGray"
@@ -317,6 +353,22 @@
           <StackPanel Grid.Row="1"
                       Orientation="Horizontal"
                       Margin="0,8,0,4">
+            <TextBlock Text="最大層數："
+                       VerticalAlignment="Center"
+                       Foreground="DimGray" />
+            <TextBox x:Name="ReferenceAuditMaxDepthTextBox"
+                     Width="60"
+                     Height="28"
+                     Text="3"
+                     Margin="6,0,0,0"
+                     VerticalContentAlignment="Center" />
+            <CheckBox x:Name="ReferenceAuditAllDepthCheckBox"
+                      Content="取所有層"
+                      Margin="10,0,14,0"
+                      VerticalAlignment="Center"
+                      IsChecked="False"
+                      Checked="DepthAllCheckBox_OnCheckedChanged"
+                      Unchecked="DepthAllCheckBox_OnCheckedChanged" />
             <TextBlock Text="預覽篩選："
                        VerticalAlignment="Center"
                        Margin="0,0,8,0" />
@@ -333,6 +385,8 @@
               <ComboBoxItem Content="僅檔案不存在（路徑無效或遺失）" />
               <ComboBoxItem Content="僅 S:\ 資料夾（路徑在 S 槽下）" />
               <ComboBoxItem Content="僅非 S:\（不含 S 槽路徑）" />
+              <ComboBoxItem Content="僅工程圖列（.slddrw）" />
+              <ComboBoxItem Content="排除工程圖列" />
             </ComboBox>
             <TextBlock x:Name="ReferenceAuditPreviewCountTextBlock"
                        Margin="14,0,0,0"
@@ -346,7 +400,7 @@
                      FontSize="11"
                      Foreground="DimGray"
                      TextWrapping="Wrap"
-                     Text="以 SolidWorks API 遞迴展開單一 .sldasm（可為 Vault 外路徑）。「在 Vault 內」以 C:\CP-PDM 為判斷根目錄；預覽可篩選（含 S:\ 路徑）。匯出稽核 xlsx 僅包含「目前預覽篩選後」的列。請在本機已安裝 SolidWorks 下執行。" />
+                     Text="以 SolidWorks API 遞迴展開單一 .sldasm（可為 Vault 外路徑）。可選「同資料夾搜尋工程圖」以加入同名 .slddrw。「在 Vault 內」以 C:\CP-PDM 為判斷根目錄；預覽可篩選（含 S:\ 路徑）。匯出稽核 xlsx 僅包含「目前預覽篩選後」的列。請在本機已安裝 SolidWorks 下執行。" />
           <DataGrid x:Name="ReferenceAuditDataGrid"
                     Grid.Row="3"
                     MinHeight="160"

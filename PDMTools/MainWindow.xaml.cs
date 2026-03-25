@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Collections;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
@@ -25,6 +26,11 @@ namespace PDMTools
     public partial class MainWindow : Window
     {
         private const string VaultRootPath = @"C:\CP-PDM";
+        private const int MaxRecentAssemblyPaths = 12;
+        private static readonly string RecentAssemblyPathsFilePath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "PDMTools",
+            "recent-assemblies.txt");
         /// <summary>參考稽核預覽篩選：路徑是否落在 S 槽（不區分大小寫）。</summary>
         private const string ReferenceAuditSDriveFolderPrefix = @"S:\";
         private PdmBomExportService _exportService;
@@ -40,10 +46,17 @@ namespace PDMTools
         private DataGridCell _inlineTextSelectionCell;
 
         private readonly ObservableCollection<ReferenceAuditRow> _auditRows = new ObservableCollection<ReferenceAuditRow>();
-        private readonly SolidWorksReferenceAuditService _referenceAuditService = new SolidWorksReferenceAuditService();
+        private SolidWorksReferenceAuditService _referenceAuditService;
         private ICollectionView _auditRowsView;
         private ReferenceAuditPreviewFilterMode _auditPreviewFilterMode = ReferenceAuditPreviewFilterMode.All;
         private MainWorkMode _currentWorkMode = MainWorkMode.Bom;
+        private bool _referenceAuditEnvironmentReady = true;
+        private string _referenceAuditEnvironmentMessage = string.Empty;
+        private bool _configurationLoadInProgress;
+
+        private static readonly Brush BomConfigStatusReadyBrush = new SolidColorBrush(Color.FromRgb(46, 125, 50));
+        private static readonly Brush BomConfigStatusWarnBrush = new SolidColorBrush(Color.FromRgb(198, 40, 40));
+        private static readonly Brush BomConfigStatusInfoBrush = new SolidColorBrush(Color.FromRgb(21, 101, 192));
 
         private enum ReferenceAuditPreviewFilterMode
         {
@@ -52,7 +65,9 @@ namespace PDMTools
             NotInVaultOnly = 2,
             FileMissingOnly = 3,
             UnderSDriveOnly = 4,
-            NotUnderSDriveOnly = 5
+            NotUnderSDriveOnly = 5,
+            DrawingsOnly = 6,
+            ExcludeDrawings = 7
         }
 
         private enum MainWorkMode
@@ -84,10 +99,15 @@ namespace PDMTools
         private List<BomItem> _rawBomItems = new List<BomItem>();
         // 含工程圖列的 BOM；Toggle ON 時由 AppendDrawingItemsAsync 建立並快取
         private List<BomItem> _bomItemsWithDrawings = null;
+        private readonly List<string> _recentAssemblyPaths = new List<string>();
 
         public MainWindow()
         {
             InitializeComponent();
+            ConfigComboBox.AddHandler(TextBoxBase.TextChangedEvent, new TextChangedEventHandler((_, __) => UpdateBomConfigurationUiState()));
+            LoadRecentAssemblyPaths();
+            UpdateDepthInputStates();
+            ApplyBomDepthDefaultByDefinition();
             SetProgressPercent(0);
             _bomItemsView = CollectionViewSource.GetDefaultView(_bomItems);
             _bomItemsView.Filter = FilterBomItem;
@@ -135,6 +155,7 @@ namespace PDMTools
 
             // 視窗完全載入後，延後執行背景偵測，避免影響啟動體感
             Loaded += MainWindow_OnLoaded;
+            UpdateBomConfigurationUiState();
         }
         private async void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
         {
@@ -164,6 +185,66 @@ namespace PDMTools
             }
 
             public event PropertyChangedEventHandler PropertyChanged;
+        }
+
+        private sealed class BomItemLevelComparer : IComparer
+        {
+            private readonly ListSortDirection _direction;
+
+            public BomItemLevelComparer(ListSortDirection direction)
+            {
+                _direction = direction;
+            }
+
+            public int Compare(object x, object y)
+            {
+                var a = x as BomItem;
+                var b = y as BomItem;
+                var result = CompareLevel(a?.Level, b?.Level);
+                return _direction == ListSortDirection.Ascending ? result : -result;
+            }
+
+            private static int CompareLevel(string left, string right)
+            {
+                var la = ParseLevel(left);
+                var rb = ParseLevel(right);
+                var n = Math.Min(la.Count, rb.Count);
+                for (var i = 0; i < n; i++)
+                {
+                    var cmp = la[i].CompareTo(rb[i]);
+                    if (cmp != 0)
+                    {
+                        return cmp;
+                    }
+                }
+
+                return la.Count.CompareTo(rb.Count);
+            }
+
+            private static List<int> ParseLevel(string level)
+            {
+                var text = (level ?? string.Empty).Trim();
+                if (text.Length == 0)
+                {
+                    return new List<int> { int.MaxValue };
+                }
+
+                var parts = text.Split('.');
+                var result = new List<int>(parts.Length);
+                foreach (var p in parts)
+                {
+                    if (int.TryParse(p, out var v))
+                    {
+                        result.Add(v);
+                    }
+                    else
+                    {
+                        result.Add(int.MaxValue - 1);
+                    }
+                }
+
+                return result;
+            }
         }
 
         // ── DataGrid 欄位建立 ──────────────────────────────────────────────
@@ -261,6 +342,36 @@ namespace PDMTools
             RebuildAllFilterValueOptions();
             UpdateFilterUiState();
             _bomItemsView?.Refresh();
+        }
+
+        private void BomDataGrid_OnSorting(object sender, DataGridSortingEventArgs e)
+        {
+            var headerInfo = e.Column?.Header as ColumnHeaderInfo;
+            if (!string.Equals(headerInfo?.Key, "Level", StringComparison.OrdinalIgnoreCase))
+            {
+                if (_bomItemsView is ListCollectionView lcvDefault)
+                {
+                    lcvDefault.CustomSort = null;
+                }
+
+                return;
+            }
+
+            e.Handled = true;
+            var direction = e.Column.SortDirection != ListSortDirection.Ascending
+                ? ListSortDirection.Ascending
+                : ListSortDirection.Descending;
+
+            foreach (var col in BomDataGrid.Columns)
+            {
+                col.SortDirection = null;
+            }
+
+            e.Column.SortDirection = direction;
+            if (_bomItemsView is ListCollectionView lcv)
+            {
+                lcv.CustomSort = new BomItemLevelComparer(direction);
+            }
         }
 
         private void AutoSizeDataGridColumns()
@@ -363,6 +474,48 @@ namespace PDMTools
             OpenTextSelectionMode(cellText ?? string.Empty, cell);
         }
 
+        private void RecentPathsButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_recentAssemblyPaths.Count == 0)
+            {
+                MessageBox.Show(this, "目前沒有最近使用的組合件。", "提醒", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            if (sender is not Button button)
+            {
+                return;
+            }
+
+            var menu = new ContextMenu();
+            foreach (var p in _recentAssemblyPaths)
+            {
+                var header = p;
+                if (header.Length > 100)
+                {
+                    header = "..." + header.Substring(header.Length - 97);
+                }
+
+                var mi = new MenuItem
+                {
+                    Header = header,
+                    ToolTip = p,
+                    Tag = p
+                };
+                mi.Click += (_, __) =>
+                {
+                    SetAssemblyPathText(p, isImported: true);
+                    StatusTextBlock.Text = "已套用最近使用路徑。";
+                    _ = PopulateConfigurationComboForPathAsync(p, showFailureDialogs: false);
+                };
+                menu.Items.Add(mi);
+            }
+
+            menu.PlacementTarget = button;
+            menu.Placement = PlacementMode.Bottom;
+            menu.IsOpen = true;
+        }
+
         private async void BrowseButton_OnClick(object sender, RoutedEventArgs e)
         {
             if (_currentWorkMode == MainWorkMode.ReferenceAudit)
@@ -382,6 +535,7 @@ namespace PDMTools
                 {
                     SetAssemblyPathText(auditDialog.FileName, isImported: true);
                     StatusTextBlock.Text = "已選擇稽核組合件。";
+                    _ = PopulateConfigurationComboForPathAsync(auditDialog.FileName, showFailureDialogs: false);
                 }
 
                 return;
@@ -428,8 +582,35 @@ namespace PDMTools
             await PopulateConfigurationComboForPathAsync(dialog.FileName);
         }
 
+        private void BomLevelDefinitionComboBox_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            ApplyBomDepthDefaultByDefinition();
+        }
+
         private async void RunReferenceAuditButton_OnClick(object sender, RoutedEventArgs e)
         {
+            if (!EvaluateReferenceAuditEnvironment(showMessageBoxWhenUnavailable: true))
+            {
+                return;
+            }
+
+            int? maxAuditDepth = null;
+            if (ReferenceAuditAllDepthCheckBox?.IsChecked == true)
+            {
+                maxAuditDepth = null;
+            }
+            else
+            {
+                var txt = ReferenceAuditMaxDepthTextBox?.Text?.Trim() ?? string.Empty;
+                if (!int.TryParse(txt, out var parsed) || parsed <= 0)
+                {
+                    MessageBox.Show(this, "請輸入正確的「最大層數」。例如：3", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    return;
+                }
+
+                maxAuditDepth = parsed;
+            }
+
             var raw = AssemblyPathTextBox.Text?.Trim().Trim('"') ?? string.Empty;
             if (string.IsNullOrWhiteSpace(raw))
             {
@@ -469,9 +650,11 @@ namespace PDMTools
             try
             {
                 IReadOnlyList<ReferenceAuditRow> rows = null;
+                var includeDrw = ReferenceAuditIncludeDrawingsCheckBox?.IsChecked == true;
                 await Dispatcher.InvokeAsync(() =>
                 {
-                    rows = _referenceAuditService.AuditAssembly(path, VaultRootPath);
+                    rows = (_referenceAuditService ??= new SolidWorksReferenceAuditService())
+                        .AuditAssembly(path, VaultRootPath, maxAuditDepth, includeDrw);
                 }, DispatcherPriority.Normal);
 
                 rows ??= Array.Empty<ReferenceAuditRow>();
@@ -481,15 +664,18 @@ namespace PDMTools
 
                 var notInVault = rows.Count(r =>
                     !r.IsUnderVaultRoot && !string.IsNullOrWhiteSpace(r.FullPath));
-                StatusTextBlock.Text =
-                    $"稽核完成，共 {rows.Count} 筆引用（其中 {notInVault} 筆路徑不在 Vault 根目錄 {VaultRootPath} 下）。";
+                var drwCount = rows.Count(r => r.IsDrawing);
+                StatusTextBlock.Text = includeDrw
+                    ? $"稽核完成，共 {rows.Count} 筆（含工程圖 {drwCount} 筆；其中 {notInVault} 筆路徑不在 Vault 根目錄 {VaultRootPath} 下）。"
+                    : $"稽核完成，共 {rows.Count} 筆引用（其中 {notInVault} 筆路徑不在 Vault 根目錄 {VaultRootPath} 下）。";
                 ExportReferenceAuditButton.IsEnabled = rows.Count > 0;
                 _auditRowsView?.Refresh();
                 UpdateAuditPreviewCountLabel();
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, ex.Message, "稽核失敗", MessageBoxButton.OK, MessageBoxImage.Error);
+                var detail = BuildReferenceAuditFailureMessage(ex);
+                MessageBox.Show(this, detail, "稽核失敗", MessageBoxButton.OK, MessageBoxImage.Error);
                 StatusTextBlock.Text = "稽核失敗。";
             }
             finally
@@ -500,10 +686,40 @@ namespace PDMTools
 
         private void MainModeRadioButton_OnChecked(object sender, RoutedEventArgs e)
         {
-            var mode = ReferenceAuditModeRadioButton.IsChecked == true
-                ? MainWorkMode.ReferenceAudit
-                : MainWorkMode.Bom;
+            // XAML 初始化期間可能先觸發 Checked，此時另一顆 RadioButton 尚未建立。
+            var mode = MainWorkMode.Bom;
+            if (ReferenceAuditModeRadioButton != null)
+            {
+                mode = ReferenceAuditModeRadioButton.IsChecked == true
+                    ? MainWorkMode.ReferenceAudit
+                    : MainWorkMode.Bom;
+            }
+            else if (sender is RadioButton rb)
+            {
+                mode = string.Equals(rb.Name, nameof(ReferenceAuditModeRadioButton), StringComparison.Ordinal)
+                    ? MainWorkMode.ReferenceAudit
+                    : MainWorkMode.Bom;
+            }
+
             ApplyMainModeUi(mode);
+        }
+
+        private void DepthAllCheckBox_OnCheckedChanged(object sender, RoutedEventArgs e)
+        {
+            UpdateDepthInputStates();
+        }
+
+        private void UpdateDepthInputStates()
+        {
+            if (MaxBomDepthTextBox != null && AllBomDepthCheckBox != null)
+            {
+                MaxBomDepthTextBox.IsEnabled = AllBomDepthCheckBox.IsChecked != true;
+            }
+
+            if (ReferenceAuditMaxDepthTextBox != null && ReferenceAuditAllDepthCheckBox != null)
+            {
+                ReferenceAuditMaxDepthTextBox.IsEnabled = ReferenceAuditAllDepthCheckBox.IsChecked != true;
+            }
         }
 
         private void ApplyMainModeUi(MainWorkMode mode)
@@ -521,10 +737,91 @@ namespace PDMTools
             if (BrowseButton != null)
                 BrowseButton.Content = isBomMode ? "導入文件" : "選擇檔案";
 
+            if (!isBomMode)
+            {
+                EvaluateReferenceAuditEnvironment(showMessageBoxWhenUnavailable: false);
+            }
+
             if (StatusTextBlock != null)
                 StatusTextBlock.Text = isBomMode
                     ? (_bomItems.Count > 0 ? $"目前為 Vault BOM 模式（{_bomItems.Count} 筆）。" : "目前為 Vault BOM 模式。")
-                    : (_auditRows.Count > 0 ? $"目前為參考稽核模式（{_auditRows.Count} 筆）。" : "目前為參考稽核模式。");
+                    : (_referenceAuditEnvironmentReady
+                        ? (_auditRows.Count > 0 ? $"目前為參考稽核模式（{_auditRows.Count} 筆）。" : "目前為參考稽核模式。")
+                        : $"目前為參考稽核模式（環境未就緒：{_referenceAuditEnvironmentMessage}）");
+
+            if (isBomMode)
+            {
+                UpdateBomConfigurationUiState();
+                Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => _ = EnsureBomConfigurationsReadyAsync()));
+            }
+            else if (BomConfigStatusTextBlock != null)
+            {
+                BomConfigStatusTextBlock.Text = string.Empty;
+            }
+
+            SetUiBusy(IsUiBusy());
+        }
+
+        private bool EvaluateReferenceAuditEnvironment(bool showMessageBoxWhenUnavailable)
+        {
+            Type swType = null;
+            try
+            {
+                swType = Type.GetTypeFromProgID("SldWorks.Application");
+            }
+            catch
+            {
+                swType = null;
+            }
+
+            if (swType == null)
+            {
+                _referenceAuditEnvironmentReady = false;
+                _referenceAuditEnvironmentMessage = "偵測不到 SolidWorks COM（SldWorks.Application）";
+            }
+            else
+            {
+                _referenceAuditEnvironmentReady = true;
+                _referenceAuditEnvironmentMessage = string.Empty;
+            }
+
+            if (RunReferenceAuditButton != null)
+            {
+                RunReferenceAuditButton.IsEnabled = _referenceAuditEnvironmentReady;
+            }
+
+            if (!_referenceAuditEnvironmentReady && showMessageBoxWhenUnavailable)
+            {
+                MessageBox.Show(
+                    this,
+                    "目前無法執行「參考稽核」。\n\n" +
+                    "原因：偵測不到 SolidWorks 的 COM 元件（SldWorks.Application）。\n\n" +
+                    "請確認：\n" +
+                    "1) 本機已安裝 SolidWorks\n" +
+                    "2) SolidWorks 安裝/修復完成，COM 註冊正常\n" +
+                    "3) 以目前使用者可正常啟動 SolidWorks",
+                    "環境未就緒",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+
+            return _referenceAuditEnvironmentReady;
+        }
+
+        private static string BuildReferenceAuditFailureMessage(Exception ex)
+        {
+            var msg = ex?.Message ?? "未知錯誤";
+            if (msg.IndexOf("SldWorks.Application", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                msg.IndexOf("無法建立 SolidWorks", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                msg.IndexOf("ProgID", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return "無法啟動 SolidWorks 進行稽核。\n\n" +
+                       "請先確認 SolidWorks 已安裝且可由目前使用者正常啟動，" +
+                       "再重新執行稽核。\n\n" +
+                       $"原始訊息：{msg}";
+            }
+
+            return msg;
         }
 
         private void ReferenceAuditPreviewFilterComboBox_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -534,7 +831,7 @@ namespace PDMTools
             var idx = cb.SelectedIndex;
             if (idx < 0)
                 idx = 0;
-            var maxIdx = (int)ReferenceAuditPreviewFilterMode.NotUnderSDriveOnly;
+            var maxIdx = (int)ReferenceAuditPreviewFilterMode.ExcludeDrawings;
             _auditPreviewFilterMode = (ReferenceAuditPreviewFilterMode)Math.Min(idx, maxIdx);
             _auditRowsView?.Refresh();
             UpdateAuditPreviewCountLabel();
@@ -556,6 +853,8 @@ namespace PDMTools
                 ReferenceAuditPreviewFilterMode.FileMissingOnly => !row.FileExists,
                 ReferenceAuditPreviewFilterMode.UnderSDriveOnly => IsFullPathUnderPrefix(row.FullPath, ReferenceAuditSDriveFolderPrefix),
                 ReferenceAuditPreviewFilterMode.NotUnderSDriveOnly => !IsFullPathUnderPrefix(row.FullPath, ReferenceAuditSDriveFolderPrefix),
+                ReferenceAuditPreviewFilterMode.DrawingsOnly => row.IsDrawing,
+                ReferenceAuditPreviewFilterMode.ExcludeDrawings => !row.IsDrawing,
                 _ => true
             };
         }
@@ -676,21 +975,19 @@ namespace PDMTools
                 maxBomLayerDepth = maxDepth;
             }
 
-            if (ConfigComboBox.SelectedItem == null || ConfigComboBox.Items.Count == 0)
+            var configurationName = GetEffectiveConfigurationName();
+            if (string.IsNullOrWhiteSpace(configurationName))
             {
                 MessageBox.Show(
                     this,
-                    "請先以「導入文件」選擇或貼上組合件路徑，並等待組態清單載入完成後，再從「組態」下拉選單選取組態。",
-                    "提醒",
+                    "請指定要使用的組態：\n\n"
+                    + "• 若已載入清單：請從「組態」下拉選單選取一項\n"
+                    + "• 若清單載入失敗：請直接在「組態」欄位輸入或貼上組態名稱\n"
+                    + "• 亦可按「重新載入組態」向 PDM 再試一次",
+                    "尚未選組態",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning);
-                return;
-            }
-
-            var configurationName = (ConfigComboBox.SelectedItem as string ?? ConfigComboBox.SelectedItem?.ToString() ?? string.Empty).Trim();
-            if (string.IsNullOrEmpty(configurationName))
-            {
-                MessageBox.Show(this, "請在「組態」下拉選單選取一個組態。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                UpdateBomConfigurationUiState();
                 return;
             }
 
@@ -971,7 +1268,9 @@ namespace PDMTools
         {
             ConfigComboBox.Items.Clear();
             ConfigComboBox.SelectedItem = null;
+            ConfigComboBox.Text = string.Empty;
             ConfigComboBox.IsEnabled = false;
+            UpdateBomConfigurationUiState();
         }
 
         /// <summary>
@@ -1014,12 +1313,174 @@ namespace PDMTools
             return false;
         }
 
-        private async Task PopulateConfigurationComboForPathAsync(string assemblyPath)
+        private string GetEffectiveConfigurationName()
         {
-            if (string.IsNullOrWhiteSpace(assemblyPath) || !File.Exists(assemblyPath))
+            if (ConfigComboBox == null)
+            {
+                return string.Empty;
+            }
+
+            if (ConfigComboBox.SelectedItem != null)
+            {
+                var s = ConfigComboBox.SelectedItem as string ?? ConfigComboBox.SelectedItem.ToString();
+                if (!string.IsNullOrWhiteSpace(s))
+                {
+                    return s.Trim();
+                }
+            }
+
+            return (ConfigComboBox.Text ?? string.Empty).Trim();
+        }
+
+        private bool TryGetNormalizedAssemblyPathFromUi(out string normalizedPath)
+        {
+            normalizedPath = null;
+            var raw = AssemblyPathTextBox?.Text ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return false;
+            }
+
+            if (!TryValidateImportPath(raw, out var np, out _))
+            {
+                return false;
+            }
+
+            if (!File.Exists(np))
+            {
+                return false;
+            }
+
+            normalizedPath = np;
+            return true;
+        }
+
+        private void UpdateBomConfigurationUiState()
+        {
+            if (BomConfigStatusTextBlock == null)
             {
                 return;
             }
+
+            if (_currentWorkMode != MainWorkMode.Bom)
+            {
+                BomConfigStatusTextBlock.Text = string.Empty;
+                return;
+            }
+
+            if (_configurationLoadInProgress)
+            {
+                BomConfigStatusTextBlock.Text = "組態：載入中…";
+                BomConfigStatusTextBlock.Foreground = Brushes.DimGray;
+                return;
+            }
+
+            if (!TryGetNormalizedAssemblyPathFromUi(out _))
+            {
+                BomConfigStatusTextBlock.Text = "組態：請先指定有效的 .sldasm 路徑";
+                BomConfigStatusTextBlock.Foreground = Brushes.DimGray;
+                return;
+            }
+
+            if (ConfigComboBox == null)
+            {
+                return;
+            }
+
+            if (!ConfigComboBox.IsEnabled)
+            {
+                BomConfigStatusTextBlock.Text = "組態：請先導入組合件以載入清單";
+                BomConfigStatusTextBlock.Foreground = Brushes.DimGray;
+                return;
+            }
+
+            var name = GetEffectiveConfigurationName();
+            if (ConfigComboBox.Items.Count > 0)
+            {
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    BomConfigStatusTextBlock.Text = $"組態：已就緒（{name}）";
+                    BomConfigStatusTextBlock.Foreground = BomConfigStatusReadyBrush;
+                }
+                else
+                {
+                    BomConfigStatusTextBlock.Text = "組態：尚未選組態—請從下拉選取或手動輸入名稱";
+                    BomConfigStatusTextBlock.Foreground = BomConfigStatusWarnBrush;
+                }
+
+                return;
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                BomConfigStatusTextBlock.Text = $"組態：將使用手動輸入「{name}」（建議按「重新載入組態」確認）";
+                BomConfigStatusTextBlock.Foreground = BomConfigStatusInfoBrush;
+            }
+            else
+            {
+                BomConfigStatusTextBlock.Text = "組態：清單未載入—請手動輸入名稱，或按「重新載入組態」";
+                BomConfigStatusTextBlock.Foreground = BomConfigStatusWarnBrush;
+            }
+        }
+
+        private void ConfigComboBox_SelectionOrTextChanged(object sender, RoutedEventArgs e)
+        {
+            UpdateBomConfigurationUiState();
+        }
+
+        private async void ReloadConfigurationsButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (!TryGetNormalizedAssemblyPathFromUi(out var path))
+            {
+                MessageBox.Show(this, "請先指定有效的 .sldasm 路徑。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            await PopulateConfigurationComboForPathAsync(path, showFailureDialogs: true);
+        }
+
+        private async Task EnsureBomConfigurationsReadyAsync()
+        {
+            if (_currentWorkMode != MainWorkMode.Bom)
+            {
+                return;
+            }
+
+            if (!TryGetNormalizedAssemblyPathFromUi(out var path))
+            {
+                await Dispatcher.InvokeAsync(UpdateBomConfigurationUiState);
+                return;
+            }
+
+            var needLoad = await Dispatcher.InvokeAsync(() => ConfigComboBox.Items.Count == 0);
+            if (!needLoad)
+            {
+                await Dispatcher.InvokeAsync(UpdateBomConfigurationUiState);
+                return;
+            }
+
+            await PopulateConfigurationComboForPathAsync(path, showFailureDialogs: false);
+        }
+
+        /// <param name="showFailureDialogs">false 時僅更新狀態列，不跳出阻斷式對話框（例如由稽核模式切回或背景預載）。</param>
+        private async Task PopulateConfigurationComboForPathAsync(string assemblyPath, bool showFailureDialogs = true)
+        {
+            if (string.IsNullOrWhiteSpace(assemblyPath) || !File.Exists(assemblyPath))
+            {
+                await Dispatcher.InvokeAsync(UpdateBomConfigurationUiState);
+                return;
+            }
+
+            _configurationLoadInProgress = true;
+            await Dispatcher.InvokeAsync(() =>
+            {
+                SetUiBusy(IsUiBusy());
+                if (BomConfigStatusTextBlock != null)
+                {
+                    BomConfigStatusTextBlock.Text = "組態：載入中…";
+                    BomConfigStatusTextBlock.Foreground = Brushes.DimGray;
+                }
+            });
 
             try
             {
@@ -1048,27 +1509,37 @@ namespace PDMTools
 
                     if (ordered.Count == 0)
                     {
-                        ConfigComboBox.IsEnabled = false;
-                        StatusTextBlock.Text = "已選擇組合件，但無法從 PDM 讀取組態清單。";
+                        ConfigComboBox.IsEnabled = true;
+                        StatusTextBlock.Text = showFailureDialogs
+                            ? "已選擇組合件，但無法從 PDM 讀取組態清單。"
+                            : "已選擇組合件，尚未取得組態清單；可手動輸入組態或按「重新載入組態」。";
                         var detail = _exportService?.LastConfigurationEnumerationDiag ?? string.Empty;
                         if (detail.Length > 2800)
                         {
                             detail = detail.Substring(0, 2800) + "\n…（以下略）";
                         }
 
-                        MessageBox.Show(
-                            this,
-                            "無法從 PDM 讀取此組合件的組態清單，因此無法選擇組態。\n\n"
-                            + "請確認：\n"
-                            + "• 檔案已同步為本機最新版且可正常在 PDM 中開啟\n"
-                            + "• 本機 PDM 用戶端與程式參考的 EPDM Interop 版本一致\n"
-                            + "• 必要時請先以 SolidWorks／PDM 開啟該組合件一次後再試\n\n"
-                            + (string.IsNullOrWhiteSpace(detail)
-                                ? string.Empty
-                                : "── 程式診斷（可複製給開發者）──\n" + detail),
-                            "無法載入組態",
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Warning);
+                        if (showFailureDialogs)
+                        {
+                            MessageBox.Show(
+                                this,
+                                "無法從 PDM 讀取此組合件的組態清單。\n\n"
+                                + "您仍可嘗試：\n"
+                                + "• 在「組態」欄位手動輸入或貼上組態名稱後按「開始抓取」\n"
+                                + "• 按「重新載入組態」再試一次\n\n"
+                                + "若持續失敗請確認：\n"
+                                + "• 檔案已同步為本機最新版且可正常在 PDM 中開啟\n"
+                                + "• 本機 PDM 用戶端與程式參考的 EPDM Interop 版本一致\n"
+                                + "• 必要時請先以 SolidWorks／PDM 開啟該組合件一次後再試\n\n"
+                                + (string.IsNullOrWhiteSpace(detail)
+                                    ? string.Empty
+                                    : "── 程式診斷（可複製給開發者）──\n" + detail),
+                                "無法載入組態",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Warning);
+                        }
+
+                        UpdateBomConfigurationUiState();
                         return;
                     }
 
@@ -1094,6 +1565,7 @@ namespace PDMTools
                     ConfigComboBox.IsEnabled = true;
                     StatusTextBlock.Text =
                         $"已選擇組合件，已載入 {ordered.Count} 個組態；預設選取「{preferred}」（優先為文件作用中組態，可改選）。";
+                    UpdateBomConfigurationUiState();
                 });
             }
             catch (Exception ex)
@@ -1102,14 +1574,31 @@ namespace PDMTools
                 {
                     ConfigComboBox.Items.Clear();
                     ConfigComboBox.SelectedItem = null;
-                    ConfigComboBox.IsEnabled = false;
-                    StatusTextBlock.Text = "已選擇組合件，但讀取組態時發生錯誤。";
-                    MessageBox.Show(
-                        this,
-                        "讀取組態清單時發生錯誤：\n" + ex.Message,
-                        "錯誤",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Error);
+                    ConfigComboBox.IsEnabled = true;
+                    StatusTextBlock.Text = showFailureDialogs
+                        ? "已選擇組合件，但讀取組態時發生錯誤。"
+                        : "已選擇組合件，讀取組態失敗；可直接輸入組態名稱，或按「重新載入組態」。";
+
+                    if (showFailureDialogs)
+                    {
+                        MessageBox.Show(
+                            this,
+                            "讀取組態清單時發生錯誤：\n" + ex.Message + "\n\n您仍可手動輸入組態名稱，或按「重新載入組態」再試。",
+                            "錯誤",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Error);
+                    }
+
+                    UpdateBomConfigurationUiState();
+                });
+            }
+            finally
+            {
+                _configurationLoadInProgress = false;
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    SetUiBusy(IsUiBusy());
+                    UpdateBomConfigurationUiState();
                 });
             }
         }
@@ -1238,20 +1727,75 @@ namespace PDMTools
 
         private void SetUiBusy(bool isBusy)
         {
-            BrowseButton.IsEnabled         = !isBusy;
+            // InitializeComponent 期間，作業模式 Radio 的 Checked 可能早於下方面板建立，須逐項判空。
             var isBomMode = _currentWorkMode == MainWorkMode.Bom;
-            StartGrabButton.IsEnabled      = !isBusy && isBomMode;
-            ExportButton.IsEnabled         = !isBusy && isBomMode;
-            ColumnSettingsButton.IsEnabled = !isBusy && isBomMode;
-            ClearFiltersButton.IsEnabled   = !isBusy && isBomMode && HasActiveFilters();
-            // Toggle 只在有資料時才可操作，忙碌中一律禁用
-            ShowDrawingsToggle.IsEnabled   = !isBusy && isBomMode && _rawBomItems.Count > 0;
-            RunReferenceAuditButton.IsEnabled = !isBusy && !isBomMode;
-            ExportReferenceAuditButton.IsEnabled = !isBusy && !isBomMode && _auditRows.Count > 0;
-            ReferenceAuditPreviewFilterComboBox.IsEnabled = !isBusy && !isBomMode;
-            BomModeRadioButton.IsEnabled = !isBusy;
-            ReferenceAuditModeRadioButton.IsEnabled = !isBusy;
-            Mouse.OverrideCursor           = isBusy ? Cursors.Wait : null;
+
+            if (BrowseButton != null)
+            {
+                BrowseButton.IsEnabled = !isBusy;
+            }
+            if (RecentPathsButton != null)
+            {
+                RecentPathsButton.IsEnabled = !isBusy && _recentAssemblyPaths.Count > 0;
+            }
+
+            if (StartGrabButton != null)
+            {
+                StartGrabButton.IsEnabled = !isBusy && isBomMode;
+            }
+
+            if (ExportButton != null)
+            {
+                ExportButton.IsEnabled = !isBusy && isBomMode;
+            }
+
+            if (ColumnSettingsButton != null)
+            {
+                ColumnSettingsButton.IsEnabled = !isBusy && isBomMode;
+            }
+
+            if (ClearFiltersButton != null)
+            {
+                ClearFiltersButton.IsEnabled = !isBusy && isBomMode && HasActiveFilters();
+            }
+
+            if (ShowDrawingsToggle != null)
+            {
+                ShowDrawingsToggle.IsEnabled = !isBusy && isBomMode && _rawBomItems.Count > 0;
+            }
+
+            if (RunReferenceAuditButton != null)
+            {
+                RunReferenceAuditButton.IsEnabled = !isBusy && !isBomMode && _referenceAuditEnvironmentReady;
+            }
+
+            if (ExportReferenceAuditButton != null)
+            {
+                ExportReferenceAuditButton.IsEnabled = !isBusy && !isBomMode && _auditRows.Count > 0;
+            }
+
+            if (ReferenceAuditPreviewFilterComboBox != null)
+            {
+                ReferenceAuditPreviewFilterComboBox.IsEnabled = !isBusy && !isBomMode;
+            }
+
+            if (BomModeRadioButton != null)
+            {
+                BomModeRadioButton.IsEnabled = !isBusy;
+            }
+
+            if (ReferenceAuditModeRadioButton != null)
+            {
+                ReferenceAuditModeRadioButton.IsEnabled = !isBusy;
+            }
+
+            if (ReloadConfigurationsButton != null)
+            {
+                ReloadConfigurationsButton.IsEnabled = !isBusy && isBomMode && !_configurationLoadInProgress &&
+                                                       TryGetNormalizedAssemblyPathFromUi(out _);
+            }
+
+            Mouse.OverrideCursor = isBusy ? Cursors.Wait : null;
         }
 
         /// <summary>同步更新進度條與右側固定位置之百分比文字。</summary>
@@ -1270,6 +1814,99 @@ namespace PDMTools
             SetAssemblyPathPendingVisual(!string.IsNullOrWhiteSpace(AssemblyPathTextBox.Text));
         }
 
+        private void ApplyBomDepthDefaultByDefinition()
+        {
+            if (BomLevelDefinitionComboBox == null || MaxBomDepthTextBox == null)
+            {
+                return;
+            }
+
+            // 定義A（含根）與定義B（不含根）皆預設 3，仍可手動修改。
+            MaxBomDepthTextBox.Text = "3";
+        }
+
+        private void LoadRecentAssemblyPaths()
+        {
+            _recentAssemblyPaths.Clear();
+            try
+            {
+                if (!File.Exists(RecentAssemblyPathsFilePath))
+                {
+                    return;
+                }
+
+                foreach (var line in File.ReadAllLines(RecentAssemblyPathsFilePath))
+                {
+                    var p = line?.Trim() ?? string.Empty;
+                    if (p.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    if (_recentAssemblyPaths.Any(x => string.Equals(x, p, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        continue;
+                    }
+
+                    _recentAssemblyPaths.Add(p);
+                    if (_recentAssemblyPaths.Count >= MaxRecentAssemblyPaths)
+                    {
+                        break;
+                    }
+                }
+            }
+            catch
+            {
+                // ignore and keep empty list
+            }
+        }
+
+        private void SaveRecentAssemblyPaths()
+        {
+            try
+            {
+                var dir = Path.GetDirectoryName(RecentAssemblyPathsFilePath);
+                if (!string.IsNullOrWhiteSpace(dir))
+                {
+                    Directory.CreateDirectory(dir);
+                }
+
+                File.WriteAllLines(RecentAssemblyPathsFilePath, _recentAssemblyPaths);
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private void AddRecentAssemblyPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                return;
+            }
+
+            string normalized;
+            try
+            {
+                normalized = Path.GetFullPath(path.Trim().Trim('"'));
+            }
+            catch
+            {
+                return;
+            }
+
+            _recentAssemblyPaths.RemoveAll(x => string.Equals(x, normalized, StringComparison.OrdinalIgnoreCase));
+            _recentAssemblyPaths.Insert(0, normalized);
+            if (_recentAssemblyPaths.Count > MaxRecentAssemblyPaths)
+            {
+                _recentAssemblyPaths.RemoveRange(MaxRecentAssemblyPaths, _recentAssemblyPaths.Count - MaxRecentAssemblyPaths);
+            }
+
+            SaveRecentAssemblyPaths();
+            SetUiBusy(IsUiBusy());
+        }
+
         private void SetAssemblyPathText(string path, bool isImported)
         {
             _suppressAssemblyPathTextChanged = true;
@@ -1283,6 +1920,10 @@ namespace PDMTools
             }
 
             SetAssemblyPathPendingVisual(!isImported && !string.IsNullOrWhiteSpace(path));
+            if (isImported)
+            {
+                AddRecentAssemblyPath(path);
+            }
         }
 
         private void SetAssemblyPathPendingVisual(bool isPending)

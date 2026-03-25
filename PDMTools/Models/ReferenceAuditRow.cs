@@ -15,5 +15,9 @@ namespace PDMTools.Models
         public string Extension { get; set; } = string.Empty;
         public bool IsUnderVaultRoot { get; set; }
         public bool FileExists { get; set; }
+        /// <summary>由「同名工程圖」搜尋插入之列；一般零組件引用為 false。</summary>
+        public bool IsDrawing { get; set; }
+        /// <summary>僅工程圖列：同名搜尋所依據之 .sldprt／.sldasm 路徑（多處引用時以「; 」合併）。</summary>
+        public string RelatedModelPath { get; set; } = string.Empty;
     }
 }

@@ -433,6 +433,16 @@ namespace PDMTools.Services
                         progressWhileParsingMax: 100,
                         cancellationToken);
 
+                    items = EnsureRootRowForIncludeMode(
+                        items,
+                        assemblyPath,
+                        file,
+                        cardVarNames,
+                        includeRootBomItem,
+                        configResolved);
+
+                    NormalizeBomLevelPresentation(items, assemblyPath, includeRootBomItem);
+
                     progress?.Report(new ProgressInfo(100, $"解析完成，共 {items.Count} 筆。"));
                     return (IReadOnlyList<BomItem>)items;
                 }
@@ -1985,6 +1995,137 @@ namespace PDMTools.Services
             }
 
             return level.Split('.').Length;
+        }
+
+        /// <summary>
+        /// 某些 PDM 經計算 BOM 版面不會回傳根列；在「定義A（含根）」時補上一列根組件，
+        /// 並將既有列階層整體下移一層（1.x...），以維持層數語意一致。
+        /// </summary>
+        private List<BomItem> EnsureRootRowForIncludeMode(
+            List<BomItem> items,
+            string assemblyPath,
+            IEdmFile5 rootFile,
+            IReadOnlyList<string> cardVarNames,
+            bool includeRootBomItem,
+            string configurationName)
+        {
+            if (!includeRootBomItem)
+            {
+                return items;
+            }
+
+            var hasRoot = items.Any(i =>
+                i != null &&
+                IsSameAssemblyPath(i.FullPath, assemblyPath));
+            if (hasRoot)
+            {
+                return items;
+            }
+
+            var normalized = new List<BomItem>(items.Count + 1);
+            BomItem rootItem = null;
+
+            if (rootFile != null)
+            {
+                var referencedAs = ReferencedAsForConfiguration(assemblyPath, configurationName);
+                rootItem = BuildBomItem("1", rootFile, assemblyPath, referencedAs, cardVarNames);
+            }
+            else
+            {
+                rootItem = new BomItem
+                {
+                    Level = "1",
+                    FileName = Path.GetFileName(assemblyPath),
+                    FullPath = assemblyPath
+                };
+            }
+
+            rootItem.Level = "0";
+            rootItem.UsageCount = null;
+            normalized.Add(rootItem);
+
+            foreach (var item in items)
+            {
+                if (item == null || string.IsNullOrWhiteSpace(item.Level))
+                {
+                    continue;
+                }
+                normalized.Add(item);
+            }
+
+            return normalized;
+        }
+
+        /// <summary>
+        /// 將 Level 正規化為展示規則：
+        /// 定義A（含根）：0, 0.x, 0.x.x ...
+        /// 定義B（不含根）：x, x.x, x.x.x ...（即 A 去掉最前面的「0.」並移除根列）。
+        /// </summary>
+        private static void NormalizeBomLevelPresentation(IList<BomItem> items, string assemblyPath, bool includeRootBomItem)
+        {
+            if (items == null || items.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var item in items)
+            {
+                if (item == null)
+                {
+                    continue;
+                }
+
+                if (IsSameAssemblyPath(item.FullPath, assemblyPath))
+                {
+                    item.Level = "0";
+                    item.UsageCount = null;
+                    continue;
+                }
+
+                var lv = (item.Level ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(lv))
+                {
+                    continue;
+                }
+
+                if (!lv.Contains("."))
+                {
+                    item.Level = "0." + lv;
+                    continue;
+                }
+
+                if (!lv.StartsWith("0.", StringComparison.Ordinal))
+                {
+                    item.Level = "0." + lv;
+                }
+            }
+
+            if (includeRootBomItem)
+            {
+                return;
+            }
+
+            for (var i = items.Count - 1; i >= 0; i--)
+            {
+                var item = items[i];
+                if (item == null)
+                {
+                    items.RemoveAt(i);
+                    continue;
+                }
+
+                if (string.Equals(item.Level, "0", StringComparison.Ordinal))
+                {
+                    items.RemoveAt(i);
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(item.Level) &&
+                    item.Level.StartsWith("0.", StringComparison.Ordinal))
+                {
+                    item.Level = item.Level.Substring(2);
+                }
+            }
         }
 
         private static int? TryReadBomQuantity(IEdmBomCell cell, EdmBomColumn[] columns)

@@ -26,7 +26,12 @@ namespace PDMTools.Services
         /// 相同完整路徑僅保留一列；若多處引用會合併「上一層組合件路徑」並取較淺的 <see cref="ReferenceAuditRow.Level"/>。
         /// 略過組合件中已「使為虛擬」的零組件（不列入表、不遞迴其子階層）。
         /// </summary>
-        public IReadOnlyList<ReferenceAuditRow> AuditAssembly(string assemblyFullPath, string vaultRootPath)
+        /// <param name="includeDrawings">若為 true，於每個已存在之 .sldprt／.sldasm 同資料夾搜尋同名 .slddrw 並加入列（不經 PDM 全庫搜尋）。</param>
+        public IReadOnlyList<ReferenceAuditRow> AuditAssembly(
+            string assemblyFullPath,
+            string vaultRootPath,
+            int? maxDepth = null,
+            bool includeDrawings = false)
         {
             if (string.IsNullOrWhiteSpace(assemblyFullPath))
                 throw new ArgumentException("請指定組合件路徑。", nameof(assemblyFullPath));
@@ -38,6 +43,9 @@ namespace PDMTools.Services
             if (!string.Equals(Path.GetExtension(normalizedAsm), ".sldasm", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("僅支援 .sldasm 組合件。");
 
+            if (maxDepth.HasValue && maxDepth.Value <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxDepth), "最大層數必須為正整數。");
+
             var vaultPrefix = NormalizeVaultPrefix(vaultRootPath);
 
             var swType = Type.GetTypeFromProgID("SldWorks.Application");
@@ -45,7 +53,24 @@ namespace PDMTools.Services
                 throw new InvalidOperationException(
                     "無法建立 SolidWorks 應用程式（找不到 ProgID SldWorks.Application）。請確認已安裝 SolidWorks。");
 
-            var swApp = (SldWorks)Activator.CreateInstance(swType);
+            SldWorks swApp = null;
+            var createdByThisRun = false;
+            try
+            {
+                // 優先附掛到既有實例，避免干擾使用者既有工作階段。
+                swApp = Marshal.GetActiveObject("SldWorks.Application") as SldWorks;
+            }
+            catch (COMException)
+            {
+                swApp = null;
+            }
+
+            if (swApp == null)
+            {
+                swApp = (SldWorks)Activator.CreateInstance(swType);
+                createdByThisRun = true;
+            }
+
             if (swApp == null)
                 throw new InvalidOperationException("無法啟動 SolidWorks 應用程式。");
 
@@ -56,7 +81,10 @@ namespace PDMTools.Services
             {
                 try
                 {
-                    swApp.Visible = false;
+                    if (createdByThisRun)
+                    {
+                        swApp.Visible = false;
+                    }
                 }
                 catch
                 {
@@ -99,7 +127,12 @@ namespace PDMTools.Services
                 foreach (var comp in ToComponentEnumerable(topRaw))
                 {
                     if (comp != null && !IsVirtualizedComponent(comp))
-                        VisitComponent(comp, normalizedAsm, normalizedAsm, vaultPrefix, byPath, level: 1);
+                        VisitComponent(comp, normalizedAsm, normalizedAsm, vaultPrefix, byPath, level: 1, maxDepth: maxDepth);
+                }
+
+                if (includeDrawings)
+                {
+                    AppendSameFolderDrawings(normalizedAsm, vaultPrefix, byPath, maxDepth);
                 }
 
                 return byPath.Values
@@ -120,6 +153,18 @@ namespace PDMTools.Services
                     catch
                     {
                         // 忽略關閉失敗
+                    }
+                }
+
+                if (createdByThisRun)
+                {
+                    try
+                    {
+                        swApp.ExitApp();
+                    }
+                    catch
+                    {
+                        // 忽略關閉失敗，避免影響主流程
                     }
                 }
             }
@@ -213,6 +258,177 @@ namespace PDMTools.Services
         }
 
         /// <summary>
+        /// 與 Vault BOM「工程圖搜尋」第一階段相同：在模型檔同資料夾尋找同名 .slddrw（檔名不分大小寫）。
+        /// </summary>
+        private static string TryFindSameFolderDrawing(string modelFullPath)
+        {
+            if (string.IsNullOrWhiteSpace(modelFullPath))
+            {
+                return null;
+            }
+
+            string dir;
+            string baseName;
+            try
+            {
+                dir = Path.GetDirectoryName(modelFullPath);
+                baseName = Path.GetFileNameWithoutExtension(modelFullPath);
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (string.IsNullOrWhiteSpace(dir) || string.IsNullOrWhiteSpace(baseName))
+            {
+                return null;
+            }
+
+            var direct = Path.Combine(dir, baseName + ".slddrw");
+            try
+            {
+                if (File.Exists(direct))
+                {
+                    return Path.GetFullPath(direct);
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            try
+            {
+                foreach (var f in Directory.EnumerateFiles(dir, "*.slddrw", SearchOption.TopDirectoryOnly))
+                {
+                    if (string.Equals(Path.GetFileNameWithoutExtension(f), baseName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return Path.GetFullPath(f);
+                    }
+                }
+            }
+            catch
+            {
+                // ignore
+            }
+
+            return null;
+        }
+
+        private static void MergeRelatedModelPaths(ReferenceAuditRow row, string modelPath)
+        {
+            if (string.IsNullOrWhiteSpace(modelPath))
+            {
+                return;
+            }
+
+            var mp = modelPath.Trim();
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var part in (row.RelatedModelPath ?? string.Empty).Split(new[] { ';' }, StringSplitOptions.RemoveEmptyEntries))
+            {
+                var t = part.Trim();
+                if (t.Length > 0)
+                {
+                    set.Add(t);
+                }
+            }
+
+            set.Add(mp);
+            row.RelatedModelPath = string.Join("; ", set.OrderBy(s => s, StringComparer.OrdinalIgnoreCase));
+        }
+
+        private static void UpsertDrawingRow(
+            IDictionary<string, ReferenceAuditRow> byPath,
+            string topAsm,
+            string vaultPrefix,
+            string drawingFullPath,
+            int modelLevel,
+            string modelFullPath)
+        {
+            var p = drawingFullPath?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(p))
+            {
+                return;
+            }
+
+            string fullNorm;
+            try
+            {
+                fullNorm = Path.GetFullPath(p);
+            }
+            catch
+            {
+                fullNorm = p;
+            }
+
+            var exists = File.Exists(fullNorm);
+            var inVault = !string.IsNullOrEmpty(vaultPrefix) &&
+                          !string.IsNullOrEmpty(fullNorm) &&
+                          fullNorm.StartsWith(vaultPrefix, StringComparison.OrdinalIgnoreCase);
+
+            var key = DedupeKeyForPath(fullNorm);
+            if (!byPath.TryGetValue(key, out var row))
+            {
+                byPath[key] = new ReferenceAuditRow
+                {
+                    TopLevelAssemblyPath = topAsm,
+                    Level = modelLevel,
+                    ParentAssemblyPath = string.Empty,
+                    FullPath = fullNorm,
+                    FileName = Path.GetFileName(fullNorm),
+                    Extension = Path.GetExtension(fullNorm),
+                    IsUnderVaultRoot = inVault,
+                    FileExists = exists,
+                    IsDrawing = true,
+                    RelatedModelPath = modelFullPath?.Trim() ?? string.Empty
+                };
+                return;
+            }
+
+            row.IsDrawing = true;
+            row.Level = Math.Min(row.Level, modelLevel);
+            row.FileExists = row.FileExists || exists;
+            row.IsUnderVaultRoot = row.IsUnderVaultRoot || inVault;
+            MergeRelatedModelPaths(row, modelFullPath);
+        }
+
+        private static void AppendSameFolderDrawings(
+            string topAsm,
+            string vaultPrefix,
+            IDictionary<string, ReferenceAuditRow> byPath,
+            int? maxDepth)
+        {
+            var snapshot = byPath.Values.Where(r => !r.IsDrawing).ToList();
+            foreach (var m in snapshot)
+            {
+                if (!m.FileExists || string.IsNullOrWhiteSpace(m.FullPath))
+                {
+                    continue;
+                }
+
+                if (maxDepth.HasValue && m.Level > maxDepth.Value)
+                {
+                    continue;
+                }
+
+                var ext = m.Extension ?? string.Empty;
+                if (!ext.Equals(".sldprt", StringComparison.OrdinalIgnoreCase) &&
+                    !ext.Equals(".sldasm", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                var drw = TryFindSameFolderDrawing(m.FullPath);
+                if (drw == null)
+                {
+                    continue;
+                }
+
+                UpsertDrawingRow(byPath, topAsm, vaultPrefix, drw, m.Level, m.FullPath);
+            }
+        }
+
+        /// <summary>
         /// 遞迴走訪零組件；<paramref name="immediateParentAsmPath"/> 為直接上層組合件 .sldasm 的完整路徑。
         /// </summary>
         private static void VisitComponent(
@@ -221,8 +437,12 @@ namespace PDMTools.Services
             string topAsm,
             string vaultPrefix,
             IDictionary<string, ReferenceAuditRow> byPath,
-            int level)
+            int level,
+            int? maxDepth)
         {
+            if (maxDepth.HasValue && level > maxDepth.Value)
+                return;
+
             if (IsVirtualizedComponent(comp))
                 return;
 
@@ -265,7 +485,7 @@ namespace PDMTools.Services
             foreach (var child in ToComponentEnumerable(childrenRaw))
             {
                 if (child != null && !IsVirtualizedComponent(child))
-                    VisitComponent(child, parentForChildren, topAsm, vaultPrefix, byPath, level + 1);
+                    VisitComponent(child, parentForChildren, topAsm, vaultPrefix, byPath, level + 1, maxDepth);
             }
         }
 
