@@ -2907,9 +2907,10 @@ namespace PDMTools.Services
                         return null;
                     }
 
-                    if (!TryInvokeGetFileCopy(file, folder))
+                    if (!TryInvokeGetFileCopy(file, folder, out var getCopyDiag))
                     {
-                        errorMessage = "無法呼叫 GetFileCopy／GetFileCopy2（API 不相容）。";
+                        errorMessage = "無法呼叫 GetFileCopy／GetFileCopy2（EPDM API 不相容）。"
+                                         + (string.IsNullOrWhiteSpace(getCopyDiag) ? string.Empty : " 診斷：" + getCopyDiag);
                         return null;
                     }
 
@@ -2935,8 +2936,9 @@ namespace PDMTools.Services
             }
         }
 
-        private static bool TryInvokeGetFileCopy(IEdmFile5 file, IEdmFolder5 folder)
+        private static bool TryInvokeGetFileCopy(IEdmFile5 file, IEdmFolder5 folder, out string diag)
         {
+            diag = string.Empty;
             if (file == null || folder == null)
             {
                 return false;
@@ -2954,6 +2956,12 @@ namespace PDMTools.Services
                     m.Name.StartsWith("GetFileCopy", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
+            if (methods.Count == 0)
+            {
+                diag = "找不到 GetFileCopy* 重載（執行期型別：" + t.FullName + "）。";
+                return false;
+            }
+
             foreach (var m in methods)
             {
                 var p = m.GetParameters();
@@ -2962,146 +2970,197 @@ namespace PDMTools.Services
                     continue;
                 }
 
-                var args = new object[p.Length];
+                // 組裝每個參數的候選值，並限制嘗試次數避免爆炸。
+                // 目標：提高跨 EPDM 版本的重載簽名匹配成功率。
+                var candidates = new List<List<object>>(p.Length);
                 for (var i = 0; i < p.Length; i++)
                 {
                     var pi = p[i];
                     var pt = pi.ParameterType;
                     var pn = (pi.Name ?? string.Empty);
 
-                    // ref / out
                     if (pt.IsByRef)
                     {
                         var elem = pt.GetElementType();
-                        if (elem == null)
+                        if (elem == typeof(int))
                         {
-                            args[i] = null;
-                        }
-                        else if (elem == typeof(int))
-                        {
-                            args[i] = 0;
+                            candidates.Add(new List<object> { 0 });
                         }
                         else if (elem == typeof(short))
                         {
-                            args[i] = (short)0;
+                            candidates.Add(new List<object> { (short)0 });
                         }
                         else if (elem == typeof(bool))
                         {
-                            args[i] = false;
+                            candidates.Add(new List<object> { false });
                         }
-                        else if (elem.IsValueType)
+                        else if (elem != null && elem.IsValueType)
                         {
                             try
                             {
-                                args[i] = Activator.CreateInstance(elem);
+                                candidates.Add(new List<object> { Activator.CreateInstance(elem) });
                             }
                             catch
                             {
-                                args[i] = null;
+                                candidates.Add(new List<object> { null });
                             }
                         }
                         else
                         {
-                            args[i] = null;
+                            candidates.Add(new List<object> { null });
                         }
-
                         continue;
                     }
 
-                    // 目的資料夾參數（通常是 IEdmFolder5 或類似介面）
+                    // Folder 介面（通常需要傳 IEdmFolder5）
                     if (pt.Name.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        if (pt.IsInstanceOfType(folder) || pt.IsAssignableFrom(folder.GetType()))
-                        {
-                            args[i] = folder;
-                        }
-                        else
-                        {
-                            args[i] = folder; // 讓 Invoke 自己決定是否可轉型
-                        }
-                        continue;
-                    }
-
-                    // int/long...：盡量用 folderId（看參數名稱是否像 Folder/Dest），否則用常見選項值 1/0
-                    if (pt == typeof(int) || pt == typeof(short) || pt == typeof(long) || pt == typeof(uint))
-                    {
-                        var looksFolder = pn.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                           pn.IndexOf("Dest", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                           pn.IndexOf("Destination", StringComparison.OrdinalIgnoreCase) >= 0;
-
-                        if (looksFolder)
-                        {
-                            args[i] = Convert.ChangeType(folderId, pt);
-                        }
-                        else
-                        {
-                            // 一般選項/旗標常見是 1（取最新/覆蓋/以預設行為）
-                            var v = 1;
-                            if (pn.IndexOf("Error", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                pn.IndexOf("Err", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                pn.IndexOf("Warning", StringComparison.OrdinalIgnoreCase) >= 0)
-                            {
-                                v = 0;
-                            }
-
-                            args[i] = Convert.ChangeType(v, pt);
-                        }
-
-                        continue;
-                    }
-
-                    if (pt == typeof(bool))
-                    {
-                        // 視為「覆蓋/啟用」等參數
-                        var v = pn.IndexOf("Override", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                pn.IndexOf("Overwrite", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                pn.IndexOf("Force", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                pn.IndexOf("Latest", StringComparison.OrdinalIgnoreCase) >= 0;
-                        args[i] = v;
+                        candidates.Add(new List<object> { folder });
                         continue;
                     }
 
                     if (pt == typeof(string))
                     {
-                        args[i] = string.Empty;
+                        // 有些版本可能把此參數當作選項字串或暫存路徑
+                        candidates.Add(new List<object> { string.Empty, null });
+                        continue;
+                    }
+
+                    if (pt == typeof(bool))
+                    {
+                        candidates.Add(new List<object> { true, false });
+                        continue;
+                    }
+
+                    if (pt == typeof(int) || pt == typeof(short) || pt == typeof(long) || pt == typeof(uint))
+                    {
+                        var ints = new List<long> { folderId, 1, 0 };
+                        if (pt == typeof(int) || pt == typeof(short) || pt == typeof(long))
+                        {
+                            ints.Add(-1);
+                            ints.Add(2);
+                        }
+
+                        var asObjects = new List<object>();
+                        foreach (var v in ints)
+                        {
+                            try
+                            {
+                                if (pt == typeof(uint))
+                                {
+                                    if (v < 0) continue;
+                                    asObjects.Add(Convert.ToUInt32(v));
+                                }
+                                else
+                                {
+                                    asObjects.Add(Convert.ChangeType(v, pt));
+                                }
+                            }
+                            catch
+                            {
+                                // ignore
+                            }
+                        }
+
+                        if (asObjects.Count == 0)
+                        {
+                            asObjects.Add(Convert.ChangeType(1, pt));
+                        }
+
+                        candidates.Add(asObjects);
                         continue;
                     }
 
                     if (!pt.IsValueType)
                     {
-                        args[i] = null;
+                        candidates.Add(new List<object> { null });
                         continue;
                     }
 
-                    // 其他值型別：使用預設值
                     try
                     {
-                        args[i] = Activator.CreateInstance(pt);
+                        candidates.Add(new List<object> { Activator.CreateInstance(pt) });
                     }
                     catch
                     {
-                        args[i] = null;
+                        candidates.Add(new List<object> { null });
                     }
                 }
 
                 try
                 {
-                    m.Invoke(file, args);
+                    // 限制最多嘗試 N 次（避免候選組合爆炸）
+                    var maxAttempts = 48;
+                    var attempt = 0;
 
-                    // 不論方法簽名怎樣，只要取檔成功就應該能在本機找到檔案
-                    var local = file.GetLocalPath(folderId);
-                    if (!string.IsNullOrWhiteSpace(local) && File.Exists(local))
+                    var args = new object[p.Length];
+                    void Recurse(int idx)
                     {
+                        if (attempt >= maxAttempts)
+                        {
+                            return;
+                        }
+
+                        if (idx == p.Length)
+                        {
+                            if (attempt >= maxAttempts) return;
+                            attempt++;
+                            try
+                            {
+                                m.Invoke(file, args);
+
+                                var local = file.GetLocalPath(folderId);
+                                if (!string.IsNullOrWhiteSpace(local) && File.Exists(local))
+                                {
+                                    throw new _LocalRetrievedSignal();
+                                }
+                            }
+                            catch (_LocalRetrievedSignal)
+                            {
+                                throw;
+                            }
+                            catch
+                            {
+                                // 嘗試下一組候選參數
+                            }
+
+                            return;
+                        }
+
+                        foreach (var cv in candidates[idx])
+                        {
+                            args[idx] = cv;
+                            Recurse(idx + 1);
+                            if (attempt >= maxAttempts)
+                            {
+                                return;
+                            }
+                        }
+                    }
+
+                    try
+                    {
+                        Recurse(0);
+                    }
+                    catch (_LocalRetrievedSignal)
+                    {
+                        // 已取到檔
                         return true;
                     }
                 }
-                catch
+                catch (Exception ex)
                 {
+                    diag = $"嘗試方法 {m.Name}（{p.Length}參數）時出現例外：{ex.Message}";
                     // 嘗試下一個重載
                 }
             }
 
             return false;
+        }
+
+        private sealed class _LocalRetrievedSignal : Exception
+        {
+            // 用於在候選參數暴力嘗試時快速跳出
         }
 
         private sealed class CardVariableSpec
