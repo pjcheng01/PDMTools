@@ -28,7 +28,8 @@ namespace PDMTools.Services
             string outputFolder,
             PdmBomExportService pdm,
             IProgress<BatchDrawingPdfProgressInfo> progress,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            bool viewPdfAfterSaving = false)
         {
             if (pdm == null)
             {
@@ -132,16 +133,24 @@ namespace PDMTools.Services
                         VaultFullPath = vaultPath,
                         Status = "失敗"
                     };
+                    var stepLog = new StringBuilder();
 
                     ModelDoc2 modelDoc = null;
                     var weOpened = false;
 
                     try
                     {
-                        var localDrw = pdm.EnsureLocalFileRetrieved(vaultPath, out var getErr);
-                        if (string.IsNullOrWhiteSpace(localDrw))
+                        stepLog.AppendLine("步驟1：工程圖取檔 + check out");
+                        var okDrw = pdm.EnsureLocalFileRetrievedAndCheckedOut(vaultPath, out var localDrw, out var getErr);
+                        if (okDrw)
                         {
-                            row.Message = "取檔失敗：" + (getErr ?? string.Empty);
+                            stepLog.AppendLine("  - 工程圖已取檔並完成 check out：" + localDrw);
+                            if (!string.IsNullOrWhiteSpace(getErr))
+                                stepLog.AppendLine("  - 注意：" + getErr);
+                        }
+                        if (!okDrw || string.IsNullOrWhiteSpace(localDrw))
+                        {
+                            row.Message = stepLog + "失敗：工程圖取檔/check out 失敗：" + (getErr ?? string.Empty);
                             result.FailCount++;
                             result.Rows.Add(row);
                             continue;
@@ -155,54 +164,37 @@ namespace PDMTools.Services
                             continue;
                         }
 
-                        modelDoc = TryFindAlreadyOpenDocument(swApp, localDrw);
-                        if (modelDoc == null)
+                        // ── 步驟2：開啟工程圖（僅為取得相依列表），取完即關閉 ──
+                        stepLog.AppendLine("步驟2：開啟工程圖取得相依列表");
                         {
                             var err = 0;
                             var warn = 0;
-                            modelDoc = (ModelDoc2)swApp.OpenDoc6(
-                                localDrw,
-                                SwDocDrawing,
-                                SwOpenSilent,
-                                "",
-                                ref err,
-                                ref warn);
+                            modelDoc = TryFindAlreadyOpenDocument(swApp, localDrw);
                             if (modelDoc == null)
                             {
-                                row.Message = $"SolidWorks 無法開啟工程圖（錯誤碼 {err}，警告碼 {warn}）。";
-                                result.FailCount++;
-                                result.Rows.Add(row);
-                                continue;
-                            }
-
-                            weOpened = true;
-                        }
-
-                        foreach (var dep in GetDependencyPaths(modelDoc))
-                        {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            if (!TryNormalizeVaultPath(dep, PdmBomExportService.VaultRootPath, out var depPath))
-                            {
-                                continue;
-                            }
-
-                            var depLocal = pdm.EnsureLocalFileRetrieved(depPath, out var depErr);
-                            if (string.IsNullOrWhiteSpace(depLocal))
-                            {
-                                row.Message = $"相依取檔失敗：{depPath} → {depErr}";
-                                result.FailCount++;
-                                result.Rows.Add(row);
-                                if (weOpened && modelDoc != null)
+                                modelDoc = (ModelDoc2)swApp.OpenDoc6(
+                                    localDrw,
+                                    SwDocDrawing,
+                                    SwOpenSilent,
+                                    "",
+                                    ref err,
+                                    ref warn);
+                                if (modelDoc == null)
                                 {
-                                    TryCloseDocument(swApp, modelDoc);
-                                    weOpened = false;
-                                    modelDoc = null;
+                                    row.Message = $"SolidWorks 無法開啟工程圖（錯誤碼 {err}，警告碼 {warn}）。";
+                                    result.FailCount++;
+                                    result.Rows.Add(row);
+                                    continue;
                                 }
 
-                                continue;
+                                weOpened = true;
                             }
                         }
 
+                        var allDeps = GetDependencyPaths(modelDoc);
+                        stepLog.AppendLine($"  - 找到 {allDeps.Count} 個相依路徑");
+
+                        // 關閉工程圖（及其獨佔的相依檔），以便 PDM 可 lock 相依
                         if (weOpened && modelDoc != null)
                         {
                             TryCloseDocument(swApp, modelDoc);
@@ -210,7 +202,45 @@ namespace PDMTools.Services
                             modelDoc = null;
                         }
 
-                        if (modelDoc == null)
+                        // ── 步驟2b：lock 所有相依 ──
+                        stepLog.AppendLine("步驟2b：相依檔 check out（工程圖已先關閉）");
+                        var depLocalPaths = new List<string>();
+                        var depCheckOutFailed = false;
+                        foreach (var dep in allDeps)
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+                            if (!TryNormalizeVaultPath(dep, PdmBomExportService.VaultRootPath, out var depPath))
+                            {
+                                stepLog.AppendLine("  - 略過非 Vault 路徑：" + dep);
+                                continue;
+                            }
+
+                            stepLog.AppendLine("  - 相依 check out：" + depPath);
+                            var depOk = pdm.EnsureLocalFileRetrievedAndCheckedOut(depPath, out var depLocal, out var depErr);
+                            if (!depOk || string.IsNullOrWhiteSpace(depLocal))
+                            {
+                                stepLog.AppendLine("    -> 失敗：" + (depErr ?? "未知"));
+                                depCheckOutFailed = true;
+                                continue;
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(depErr))
+                                stepLog.AppendLine("    -> 注意：" + depErr);
+
+                            stepLog.AppendLine("    -> check out 完成：" + depLocal);
+                            depLocalPaths.Add(depLocal);
+                        }
+
+                        if (depCheckOutFailed && depLocalPaths.Count == 0 && allDeps.Count > 0)
+                        {
+                            row.Message = stepLog + "失敗：所有相依 check out 均失敗。";
+                            result.FailCount++;
+                            result.Rows.Add(row);
+                            continue;
+                        }
+
+                        // ── 步驟3：重新開啟工程圖（相依已 lock，檔案為可寫入狀態） ──
+                        stepLog.AppendLine("步驟3：重新開啟工程圖（相依已 check out）");
                         {
                             var err2 = 0;
                             var warn2 = 0;
@@ -223,7 +253,7 @@ namespace PDMTools.Services
                                 ref warn2);
                             if (modelDoc == null)
                             {
-                                row.Message = $"相依取檔後無法重新開啟工程圖（錯誤碼 {err2}，警告碼 {warn2}）。";
+                                row.Message = stepLog + $"失敗：相依 check out 後無法重新開啟工程圖（錯誤碼 {err2}，警告碼 {warn2}）。";
                                 result.FailCount++;
                                 result.Rows.Add(row);
                                 continue;
@@ -232,25 +262,104 @@ namespace PDMTools.Services
                             weOpened = true;
                         }
 
+                        stepLog.AppendLine("步驟4：相依檔（零件/組合件）逐一重建 + 原檔存檔");
+                        foreach (var depLocal in depLocalPaths
+                                     .Where(x => !string.IsNullOrWhiteSpace(x))
+                                     .Distinct(StringComparer.OrdinalIgnoreCase))
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            var depExt = Path.GetExtension(depLocal);
+                            var depDocType = GetDocTypeFromExtension(depExt);
+                            if (depDocType == 0)
+                            {
+                                stepLog.AppendLine("  - 略過不支援副檔名：" + depLocal);
+                                continue;
+                            }
+
+                            ModelDoc2 depDoc = null;
+                            var depWeOpened = false;
+                            try
+                            {
+                                stepLog.AppendLine("  - 開啟相依檔：" + Path.GetFileName(depLocal));
+                                depDoc = TryFindAlreadyOpenDocument(swApp, depLocal);
+                                if (depDoc == null)
+                                {
+                                    var depErrOpen = 0;
+                                    var depWarnOpen = 0;
+                                    depDoc = (ModelDoc2)swApp.OpenDoc6(
+                                        depLocal,
+                                        depDocType,
+                                        SwOpenSilent,
+                                        "",
+                                        ref depErrOpen,
+                                        ref depWarnOpen);
+                                    if (depDoc == null)
+                                    {
+                                        stepLog.AppendLine("    -> 開啟失敗（Err=" + depErrOpen + ", Warn=" + depWarnOpen + "）");
+                                        row.Message = stepLog.ToString().TrimEnd();
+                                        result.FailCount++;
+                                        result.Rows.Add(row);
+                                        goto NextRow;
+                                    }
+
+                                    depWeOpened = true;
+                                }
+
+                                stepLog.AppendLine("    -> 已開啟，開始重建…");
+                                TryRebuild(depDoc);
+                                stepLog.AppendLine("    -> 重建完成，存檔中…");
+                                if (!TrySaveNative(depDoc, out var depSaveErr))
+                                {
+                                    stepLog.AppendLine("    -> 存檔失敗：" + (depSaveErr ?? "未知"));
+                                    row.Message = stepLog.ToString().TrimEnd();
+                                    result.FailCount++;
+                                    result.Rows.Add(row);
+                                    goto NextRow;
+                                }
+
+                                stepLog.AppendLine("    -> 相依完成重建+存檔 OK");
+                            }
+                            finally
+                            {
+                                if (depWeOpened && depDoc != null)
+                                {
+                                    TryCloseDocument(swApp, depDoc);
+                                }
+                            }
+                        }
+
+                        stepLog.AppendLine("步驟5：工程圖重建 + 原檔存檔");
                         TryRebuild(modelDoc);
+                        if (!TrySaveNative(modelDoc, out var drwSaveErr))
+                        {
+                            row.Message = stepLog + "失敗：工程圖重建後存檔失敗：" + (drwSaveErr ?? string.Empty);
+                            result.FailCount++;
+                            result.Rows.Add(row);
+                            continue;
+                        }
 
                         var baseName = Path.GetFileNameWithoutExtension(localDrw);
                         var pdfName = BuildUniquePdfFileName(baseName, usedPdfNames);
                         var pdfPath = Path.Combine(outDir, pdfName);
 
-                        if (!TrySaveAsPdf(modelDoc, pdfPath, out var saveErr))
+                        stepLog.AppendLine("步驟6：輸出 PDF：" + pdfPath);
+                        if (!TrySaveAsPdf(swApp, modelDoc, pdfPath, viewPdfAfterSaving, out var saveErr))
                         {
-                            row.Message = "匯出 PDF 失敗：" + (saveErr ?? string.Empty);
+                            row.Message = stepLog + "失敗：匯出 PDF 失敗：" + (saveErr ?? string.Empty);
                             result.FailCount++;
                             result.Rows.Add(row);
                             continue;
                         }
 
                         row.Status = "成功";
-                        row.Message = pdfPath;
+                        stepLog.AppendLine("完成：工程圖與相依已 check out、已重建、PDF 已輸出。");
+                        row.Message = stepLog.ToString().TrimEnd();
                         row.OutputPdfPath = pdfPath;
                         result.SuccessCount++;
                         result.Rows.Add(row);
+                    NextRow:
+                        ;
                     }
                     catch (OperationCanceledException)
                     {
@@ -348,7 +457,63 @@ namespace PDMTools.Services
             }
         }
 
-        private static bool TrySaveAsPdf(ModelDoc2 model, string pdfPath, out string errorMessage)
+        private static int GetDocTypeFromExtension(string ext)
+        {
+            if (string.IsNullOrWhiteSpace(ext))
+            {
+                return 0;
+            }
+
+            if (string.Equals(ext, ".sldprt", StringComparison.OrdinalIgnoreCase))
+            {
+                return 1; // swDocPART
+            }
+
+            if (string.Equals(ext, ".sldasm", StringComparison.OrdinalIgnoreCase))
+            {
+                return 2; // swDocASSEMBLY
+            }
+
+            if (string.Equals(ext, ".slddrw", StringComparison.OrdinalIgnoreCase))
+            {
+                return 3; // swDocDRAWING
+            }
+
+            return 0;
+        }
+
+        private static bool TrySaveNative(ModelDoc2 model, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            if (model == null)
+            {
+                errorMessage = "ModelDoc2 為 null。";
+                return false;
+            }
+
+            try
+            {
+                var errs = 0;
+                var warns = 0;
+                // swSaveAsOptions_Silent = 1
+                var ok = model.Save3(1, ref errs, ref warns);
+                if (ok)
+                {
+                    return true;
+                }
+
+                errorMessage = $"Save3 回傳 false（Errors={errs}, Warnings={warns}）。";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                return false;
+            }
+        }
+
+        private static bool TrySaveAsPdf(SldWorks swApp, ModelDoc2 model, string pdfPath,
+            bool viewPdfAfterSaving, out string errorMessage)
         {
             errorMessage = string.Empty;
             try
@@ -356,9 +521,25 @@ namespace PDMTools.Services
                 var ext = (ModelDocExtension)model.Extension;
                 var errs = 0;
                 var warns = 0;
+
+                object exportData = Missing.Value;
+                try
+                {
+                    // swExportDataFileType_e.swExportPdfData = 1
+                    var pdfData = (IExportPdfData)swApp.GetExportFileData(1);
+                    if (pdfData != null)
+                    {
+                        pdfData.ViewPdfAfterSaving = viewPdfAfterSaving;
+                        exportData = pdfData;
+                    }
+                }
+                catch
+                {
+                    // 若 API 不支援則 fallback 為 Missing.Value
+                }
+
                 // swSaveAsVersion_e.swSaveAsCurrentVersion = 0；swSaveAsOptions_e.swSaveAsOptions_Silent = 1
-                // 此版 Interop 簽名為 SaveAs(string, int, int, object, ref int, ref int)
-                ext.SaveAs(pdfPath, 0, 1, Missing.Value, ref errs, ref warns);
+                ext.SaveAs(pdfPath, 0, 1, exportData, ref errs, ref warns);
                 if (File.Exists(pdfPath))
                 {
                     return true;
@@ -429,81 +610,190 @@ namespace PDMTools.Services
             return null;
         }
 
+        /// <summary>
+        /// 從工程圖取得所有參考的模型路徑（零件/組合件）。
+        /// 使用三種方式依序嘗試：
+        /// 1) DrawingDoc.GetSheetNames → Sheet.GetViews → View.GetReferencedModelName
+        /// 2) ModelDoc2.GetDocumentDependencies2（EPDM 常見 API）
+        /// 3) ModelDocExtension.GetDependencies（反射）
+        /// </summary>
         private static IReadOnlyList<string> GetDependencyPaths(ModelDoc2 model)
         {
-            var list = new List<string>();
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
             if (model == null)
             {
-                return list;
+                return new List<string>();
             }
 
+            // ── 方法1：DrawingDoc → Sheet → View → ReferencedModelName ──
             try
             {
-                var ext = model.Extension;
-                var t = ext.GetType();
-                foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public))
+                var drwDoc = (DrawingDoc)model;
+                var sheetNames = drwDoc.GetSheetNames() as string[];
+                if (sheetNames != null)
                 {
-                    if (!string.Equals(m.Name, "GetDependencies", StringComparison.Ordinal))
+                    foreach (var sheetName in sheetNames)
                     {
-                        continue;
-                    }
-
-                    var p = m.GetParameters();
-                    if (p.Length != 3 || p[0].ParameterType != typeof(bool))
-                    {
-                        continue;
-                    }
-
-                    for (var perm = 0; perm < 8; perm++)
-                    {
-                        var a = (perm & 1) != 0;
-                        var b = (perm & 2) != 0;
-                        var c = (perm & 4) != 0;
-                        object r;
-                        try
-                        {
-                            r = m.Invoke(ext, new object[] { a, b, c });
-                        }
-                        catch
+                        if (string.IsNullOrWhiteSpace(sheetName))
                         {
                             continue;
                         }
 
-                        if (r is string[] sa)
+                        try
                         {
-                            foreach (var s in sa)
-                            {
-                                if (!string.IsNullOrWhiteSpace(s))
-                                {
-                                    list.Add(s.Trim());
-                                }
-                            }
-
-                            return list;
+                            drwDoc.ActivateSheet(sheetName);
+                        }
+                        catch
+                        {
+                            // ignore
                         }
 
-                        if (r is object[] ob)
+                        var sheet = (Sheet)drwDoc.GetCurrentSheet();
+                        if (sheet == null)
                         {
-                            foreach (var o in ob)
+                            continue;
+                        }
+
+                        var views = sheet.GetViews() as object[];
+                        if (views == null)
+                        {
+                            continue;
+                        }
+
+                        foreach (var vObj in views)
+                        {
+                            if (vObj is View view)
                             {
-                                var s = o?.ToString();
-                                if (!string.IsNullOrWhiteSpace(s))
+                                try
                                 {
-                                    list.Add(s.Trim());
+                                    var refModel = view.GetReferencedModelName();
+                                    if (!string.IsNullOrWhiteSpace(refModel))
+                                    {
+                                        set.Add(refModel.Trim());
+                                    }
+                                }
+                                catch
+                                {
+                                    // ignore
                                 }
                             }
-
-                            return list;
                         }
                     }
                 }
             }
             catch
             {
-                // 忽略
+                // 不是 DrawingDoc 或介面差異
             }
 
-            return list;
+            // ── 方法2：ModelDoc2 動態呼叫 GetDocumentDependencies2 ──
+            if (set.Count == 0)
+            {
+                try
+                {
+                    dynamic dyn = model;
+                    var deps = dyn.GetDocumentDependencies2(true, true, false);
+                    if (deps is string[] sa2)
+                    {
+                        // 回傳格式為交錯：[name0, path0, name1, path1, ...]
+                        for (var i = 1; i < sa2.Length; i += 2)
+                        {
+                            if (!string.IsNullOrWhiteSpace(sa2[i]))
+                            {
+                                set.Add(sa2[i].Trim());
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+
+            // ── 方法3：ModelDocExtension.GetDependencies（反射）──
+            if (set.Count == 0)
+            {
+                try
+                {
+                    var ext = model.Extension;
+                    var t = ext.GetType();
+                    foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public))
+                    {
+                        if (!string.Equals(m.Name, "GetDependencies", StringComparison.Ordinal))
+                        {
+                            continue;
+                        }
+
+                        var p = m.GetParameters();
+                        if (p.Length != 3 || p[0].ParameterType != typeof(bool))
+                        {
+                            continue;
+                        }
+
+                        for (var perm = 0; perm < 8; perm++)
+                        {
+                            var a = (perm & 1) != 0;
+                            var b = (perm & 2) != 0;
+                            var c = (perm & 4) != 0;
+                            object r;
+                            try
+                            {
+                                r = m.Invoke(ext, new object[] { a, b, c });
+                            }
+                            catch
+                            {
+                                continue;
+                            }
+
+                            if (r is string[] sa)
+                            {
+                                foreach (var s in sa)
+                                {
+                                    if (!string.IsNullOrWhiteSpace(s))
+                                    {
+                                        set.Add(s.Trim());
+                                    }
+                                }
+
+                                if (set.Count > 0)
+                                {
+                                    break;
+                                }
+                            }
+
+                            if (r is object[] ob)
+                            {
+                                foreach (var o in ob)
+                                {
+                                    var s = o?.ToString();
+                                    if (!string.IsNullOrWhiteSpace(s))
+                                    {
+                                        set.Add(s.Trim());
+                                    }
+                                }
+
+                                if (set.Count > 0)
+                                {
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (set.Count > 0)
+                        {
+                            break;
+                        }
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+
+            return set.ToList();
         }
 
         /// <summary>

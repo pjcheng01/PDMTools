@@ -93,7 +93,8 @@ namespace PDMTools
                     AppendLog(p.Message);
                 });
 
-                var result = svc.Run(_drawingItems, folder, _exportService, progress, _cts.Token);
+                var viewPdf = OpenPdfCheckBox.IsChecked == true;
+                var result = svc.Run(_drawingItems, folder, _exportService, progress, _cts.Token, viewPdf);
 
                 FooterTextBlock.Text =
                     $"完成：成功 {result.SuccessCount}，失敗 {result.FailCount}。報告：{result.ReportPath ?? "（無）"}";

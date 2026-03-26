@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -2907,10 +2908,26 @@ namespace PDMTools.Services
                         return null;
                     }
 
-                    if (!TryInvokeGetFileCopy(file, folder, out var getCopyDiag))
+                    // 先嘗試直接取得本機路徑（若使用者本機視圖已存在檔案，GetLocalPath 可能就能直接命中）
+                    var local0 = file.GetLocalPath(folder.ID);
+                    if (!string.IsNullOrWhiteSpace(local0) && File.Exists(local0))
+                    {
+                        return local0;
+                    }
+
+                    var okFileCopy = TryInvokeGetFileCopy(file, folder, out var getCopyDiagFile);
+                    var okVaultCopy = false;
+                    string getCopyDiagVault = string.Empty;
+                    if (!okFileCopy)
+                    {
+                        okVaultCopy = TryInvokeGetFileCopyOnVault(_vault, file, folder, out getCopyDiagVault);
+                    }
+
+                    if (!okFileCopy && !okVaultCopy)
                     {
                         errorMessage = "無法呼叫 GetFileCopy／GetFileCopy2（EPDM API 不相容）。"
-                                         + (string.IsNullOrWhiteSpace(getCopyDiag) ? string.Empty : " 診斷：" + getCopyDiag);
+                                         + (string.IsNullOrWhiteSpace(getCopyDiagFile) ? string.Empty : " File診斷：" + getCopyDiagFile)
+                                         + (string.IsNullOrWhiteSpace(getCopyDiagVault) ? string.Empty : " Vault診斷：" + getCopyDiagVault);
                         return null;
                     }
 
@@ -2936,6 +2953,123 @@ namespace PDMTools.Services
             }
         }
 
+        /// <summary>
+        /// 取檔後嘗試在 Vault 執行「取出（check out / lock）」；不做 check in。
+        /// </summary>
+        public bool EnsureLocalFileRetrievedAndCheckedOut(
+            string vaultFullPath,
+            out string localPath,
+            out string errorMessage)
+        {
+            IEdmFolder5 folder = null;
+            IEdmFile5 file = null;
+            try
+            {
+                EnsureVaultLogin();
+                file = _vault.GetFileFromPath(vaultFullPath, out folder);
+                if (file == null || folder == null)
+                {
+                    localPath = null;
+                    errorMessage = "Vault 找不到檔案，無法進行取檔/check out。";
+                    return false;
+                }
+
+                // 先嘗試取檔（GetFileCopy）
+                localPath = EnsureLocalFileRetrieved(vaultFullPath, out var getErr);
+
+                // ── Lock（check out）──
+                var lockOk = false;
+                var lockDiag = string.Empty;
+
+                // 策略1：直接呼叫 IEdmFile5.LockFile(folderID, hWnd=0)
+                if (!lockOk)
+                {
+                    try
+                    {
+                        file.LockFile(folder.ID, 0);
+                        lockOk = true;
+                    }
+                    catch (Exception ex1)
+                    {
+                        lockDiag = $"直接 LockFile(folderID,0) 失敗：{ex1.Message}";
+                    }
+                }
+
+                // 策略2：直接呼叫 LockFile(folderID, hWnd=0, flags=0)（IEdmFile7+）
+                if (!lockOk)
+                {
+                    try
+                    {
+                        ((dynamic)file).LockFile(folder.ID, 0, 0);
+                        lockOk = true;
+                    }
+                    catch (Exception ex2)
+                    {
+                        lockDiag += $" | dynamic LockFile(folderID,0,0) 失敗：{ex2.Message}";
+                    }
+                }
+
+                // 策略3：反射暴力搜尋 Lock* 方法
+                if (!lockOk)
+                {
+                    lockOk = TryInvokeLockFile(file, folder, out var reflDiag);
+                    if (!lockOk)
+                        lockDiag += " | " + reflDiag;
+                }
+
+                // 判斷 lock 後狀態
+                if (!lockOk)
+                {
+                    // 或許已被自己鎖定
+                    if (TryReadLockedState(file, out var isLocked) && isLocked)
+                        lockOk = true;
+                }
+
+                // 取得本機路徑（lock 有時會連帶拉回檔案）
+                if (string.IsNullOrWhiteSpace(localPath))
+                {
+                    try { localPath = file.GetLocalPath(folder.ID); } catch { /* ignore */ }
+                }
+
+                var fileExists = !string.IsNullOrWhiteSpace(localPath) && File.Exists(localPath);
+
+                if (lockOk && fileExists)
+                {
+                    errorMessage = string.Empty;
+                    return true;
+                }
+
+                if (lockOk && !fileExists)
+                {
+                    errorMessage = "check out 成功，但本機仍找不到檔案。";
+                    return false;
+                }
+
+                // lock 失敗但本機有檔案 → 不需 check in，重建才是重點，視為可繼續
+                if (!lockOk && fileExists)
+                {
+                    errorMessage = "WARNING: lock 未成功，但本機檔案已存在，繼續。 " + lockDiag;
+                    return true;
+                }
+
+                errorMessage = "check out 失敗且本機無檔案。"
+                               + (string.IsNullOrWhiteSpace(getErr) ? string.Empty : " 取檔診斷：" + getErr)
+                               + " Lock診斷：" + lockDiag;
+                return false;
+            }
+            catch (Exception ex)
+            {
+                localPath = null;
+                errorMessage = "check out 發生例外：" + ex.Message;
+                return false;
+            }
+            finally
+            {
+                ComHelper.Release(file);
+                ComHelper.Release(folder);
+            }
+        }
+
         private static bool TryInvokeGetFileCopy(IEdmFile5 file, IEdmFolder5 folder, out string diag)
         {
             diag = string.Empty;
@@ -2945,20 +3079,28 @@ namespace PDMTools.Services
             }
 
             var folderId = folder.ID;
-            var t = file.GetType();
+            var allMethods = new List<MethodInfo>();
+            foreach (var itf in GetKnownEdmFileInterfaceTypes())
+            {
+                try
+                {
+                    allMethods.AddRange(itf.GetMethods(BindingFlags.Instance | BindingFlags.Public));
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
 
-            // 不同 EPDM Interop 版本：GetFileCopy / GetFileCopy2 可能存在不同簽名。
-            // 這裡不硬猜參數列，而是對所有重載逐一嘗試組裝「保守預設參數」，
-            // 呼叫後用 GetLocalPath + File.Exists 驗證是否確實取到檔案。
-            var methods = t.GetMethods(BindingFlags.Instance | BindingFlags.Public)
-                .Where(m =>
-                    m.Name != null &&
-                    m.Name.StartsWith("GetFileCopy", StringComparison.OrdinalIgnoreCase))
+            var methods = allMethods
+                .Where(m => m != null && m.Name != null && m.Name.StartsWith("GetFileCopy", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(m => m.ToString(), StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
                 .ToList();
 
             if (methods.Count == 0)
             {
-                diag = "找不到 GetFileCopy* 重載（執行期型別：" + t.FullName + "）。";
+                diag = "找不到 GetFileCopy* 重載（IEdmFile* 介面）。";
                 return false;
             }
 
@@ -3156,6 +3298,372 @@ namespace PDMTools.Services
             }
 
             return false;
+        }
+
+        private static bool TryInvokeGetFileCopyOnVault(IEdmVault5 vault, IEdmFile5 file, IEdmFolder5 folder, out string diag)
+        {
+            diag = string.Empty;
+            if (vault == null || file == null || folder == null)
+            {
+                return false;
+            }
+
+            var allMethods = new List<MethodInfo>();
+            foreach (var itf in GetKnownEdmVaultInterfaceTypes())
+            {
+                try
+                {
+                    allMethods.AddRange(itf.GetMethods(BindingFlags.Instance | BindingFlags.Public));
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+
+            var methods = allMethods
+                .Where(m => m != null && m.Name != null && m.Name.StartsWith("GetFileCopy", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(m => m.ToString(), StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+
+            if (methods.Count == 0)
+            {
+                diag = "找不到 Vault.GetFileCopy* 重載（IEdmVault* 介面）。";
+                return false;
+            }
+
+            // 檔案 ID：有些簽名可能用檔案 ID 而非 IEdmFile 物件。
+            var fileId = 0;
+            try { fileId = file.ID; } catch { /* ignore */ }
+
+            var folderId = folder.ID;
+            var fileType = file.GetType();
+            var folderType = folder.GetType();
+
+            foreach (var m in methods)
+            {
+                var p = m.GetParameters();
+                if (p.Length == 0) continue;
+
+                var args = new object[p.Length];
+                var okArgBuild = true;
+                for (var i = 0; i < p.Length; i++)
+                {
+                    var pt = p[i].ParameterType;
+                    var pn = (p[i].Name ?? string.Empty);
+                    var byref = pt.IsByRef;
+                    var elem = byref ? pt.GetElementType() : pt;
+
+                    try
+                    {
+                        if (byref && elem == typeof(int))
+                        {
+                            args[i] = 0;
+                            continue;
+                        }
+
+                        if (elem == typeof(bool))
+                        {
+                            args[i] = true;
+                            continue;
+                        }
+
+                        if (elem == typeof(string))
+                        {
+                            args[i] = string.Empty;
+                            continue;
+                        }
+
+                        if (elem == typeof(int) || elem == typeof(short) || elem == typeof(long) || elem == typeof(uint))
+                        {
+                            // 根據參數名稱猜測是檔案 ID 或資料夾 ID 或選項旗標。
+                            if (pn.IndexOf("File", StringComparison.OrdinalIgnoreCase) >= 0 || pn.IndexOf("Obj", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                args[i] = Convert.ChangeType(fileId, elem);
+                                continue;
+                            }
+
+                            if (pn.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0 || pn.IndexOf("Dest", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                args[i] = Convert.ChangeType(folderId, elem);
+                                continue;
+                            }
+
+                            // 預設選項/旗標值
+                            args[i] = Convert.ChangeType(1, elem);
+                            continue;
+                        }
+
+                        // 物件型別：猜 IEdmFile / IEdmFolder
+                        if (pt.Name.IndexOf("File", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            pt.FullName != null && pt.FullName.IndexOf("IEdmFile", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            if (pt.IsAssignableFrom(fileType))
+                            {
+                                args[i] = file;
+                            }
+                            else
+                            {
+                                okArgBuild = false;
+                            }
+                            continue;
+                        }
+
+                        if (pt.Name.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                            pt.FullName != null && pt.FullName.IndexOf("IEdmFolder", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            if (pt.IsAssignableFrom(folderType))
+                            {
+                                args[i] = folder;
+                            }
+                            else
+                            {
+                                okArgBuild = false;
+                            }
+                            continue;
+                        }
+
+                        if (!elem.IsValueType)
+                        {
+                            args[i] = null;
+                            continue;
+                        }
+
+                        // 其他值型別用預設值
+                        args[i] = Activator.CreateInstance(elem);
+                    }
+                    catch
+                    {
+                        okArgBuild = false;
+                    }
+                }
+
+                if (!okArgBuild) continue;
+
+                try
+                {
+                    m.Invoke(vault, args);
+
+                    var local = file.GetLocalPath(folder.ID);
+                    if (!string.IsNullOrWhiteSpace(local) && File.Exists(local))
+                    {
+                        return true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    diag = $"呼叫 {m.Name} 時例外：{ex.Message}";
+                    // 嘗試下一個重載
+                }
+            }
+
+            return false;
+        }
+
+        private static bool TryInvokeLockFile(IEdmFile5 file, IEdmFolder5 folder, out string diag)
+        {
+            diag = string.Empty;
+            if (file == null || folder == null)
+            {
+                return false;
+            }
+
+            var allMethods = new List<MethodInfo>();
+            // COM 執行期型別通常是 __ComObject，方法簽名不一定掛在執行期型別上；
+            // 改由已知 IEdmFile* 介面清單抓 Lock* 方法。
+            foreach (var itf in GetKnownEdmFileInterfaceTypes())
+            {
+                try
+                {
+                    allMethods.AddRange(itf.GetMethods(BindingFlags.Instance | BindingFlags.Public));
+                }
+                catch { /* ignore */ }
+            }
+
+            var methods = allMethods
+                .Where(m => m != null && m.Name != null && m.Name.StartsWith("Lock", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(m => m.ToString(), StringComparer.OrdinalIgnoreCase)
+                .Select(g => g.First())
+                .ToList();
+
+            if (methods.Count == 0)
+            {
+                diag = "找不到 Lock* 重載（IEdmFile* 介面）。";
+                return false;
+            }
+
+            foreach (var m in methods)
+            {
+                var p = m.GetParameters();
+                var argSets = BuildLockArgumentSets(p, folder.ID, folder);
+                foreach (var args in argSets)
+                {
+                    try
+                    {
+                        m.Invoke(file, args);
+                        if (TryReadLockedState(file, out var locked) && locked)
+                        {
+                            return true;
+                        }
+
+                        // 若無法讀取狀態，保守視為成功（部分 API 會丟 UI/狀態更新延遲）
+                        if (!TryReadLockedState(file, out _))
+                        {
+                            return true;
+                        }
+                    }
+                    catch (TargetInvocationException tie)
+                    {
+                        var inner = tie.InnerException;
+                        var hr = inner is COMException cex ? $" (HRESULT=0x{cex.ErrorCode:X8})" : string.Empty;
+                        diag = $"嘗試 {m} 失敗：{inner?.Message ?? tie.Message}{hr}";
+                    }
+                    catch (Exception ex)
+                    {
+                        diag = $"嘗試 {m} 失敗：{ex.Message}";
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(diag))
+            {
+                diag = "Lock* 已嘗試但未能判定為已鎖定。可用方法：" +
+                       string.Join(" | ", methods.Select(x => x.Name).Distinct(StringComparer.OrdinalIgnoreCase));
+            }
+
+            return false;
+        }
+
+        private static IReadOnlyList<object[]> BuildLockArgumentSets(ParameterInfo[] parameters, int folderId, IEdmFolder5 folder)
+        {
+            var sets = new List<object[]>();
+            var bases = new[]
+            {
+                new[] { 0, folderId, 0, 0 },   // hwnd=0, parent=folderId, flags=0
+                new[] { 0, folderId, 1, 0 },   // flags=1
+                new[] { folderId, 0, 0, 0 },   // parent first
+                new[] { folderId, 0, 1, 0 },   // parent first + flags
+            };
+
+            foreach (var b in bases)
+            {
+                var args = new object[parameters.Length];
+                var ok = true;
+                var intIndex = 0;
+                for (var i = 0; i < parameters.Length; i++)
+                {
+                    var pt = parameters[i].ParameterType;
+                    var pn = parameters[i].Name ?? string.Empty;
+                    var elem = pt.IsByRef ? pt.GetElementType() : pt;
+                    try
+                    {
+                        if (pt.IsByRef)
+                        {
+                            args[i] = elem == typeof(int) ? 0 :
+                                      elem == typeof(bool) ? (object)false :
+                                      (elem != null && elem.IsValueType ? Activator.CreateInstance(elem) : null);
+                            continue;
+                        }
+
+                        if (pt.Name.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            args[i] = folder;
+                            continue;
+                        }
+
+                        if (elem == typeof(int) || elem == typeof(short) || elem == typeof(long) || elem == typeof(uint))
+                        {
+                            var v = b[Math.Min(intIndex, b.Length - 1)];
+                            // 強化命名判斷
+                            if (pn.IndexOf("Hwnd", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                pn.IndexOf("Wnd", StringComparison.OrdinalIgnoreCase) >= 0)
+                                v = 0;
+                            else if (pn.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                     pn.IndexOf("Parent", StringComparison.OrdinalIgnoreCase) >= 0)
+                                v = folderId;
+                            intIndex++;
+
+                            if (elem == typeof(uint) && v < 0) v = 0;
+                            args[i] = Convert.ChangeType(v, elem);
+                            continue;
+                        }
+
+                        if (elem == typeof(bool))
+                        {
+                            args[i] = true;
+                            continue;
+                        }
+
+                        if (elem == typeof(string))
+                        {
+                            args[i] = string.Empty;
+                            continue;
+                        }
+
+                        args[i] = elem != null && elem.IsValueType ? Activator.CreateInstance(elem) : null;
+                    }
+                    catch
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+
+                if (ok) sets.Add(args);
+            }
+
+            return sets;
+        }
+
+        private static bool TryReadLockedState(IEdmFile5 file, out bool locked)
+        {
+            locked = false;
+            if (file == null) return false;
+
+            var names = new[] { "IsLocked", "Locked", "IsLockedByMe", "LockedByMe" };
+            foreach (var itf in GetKnownEdmFileInterfaceTypes())
+            {
+                foreach (var n in names)
+                {
+                    try
+                    {
+                        var p = itf.GetProperty(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+                        if (p != null && p.PropertyType == typeof(bool))
+                        {
+                            locked = (bool)p.GetValue(file, null);
+                            return true;
+                        }
+                    }
+                    catch { /* ignore */ }
+                }
+            }
+
+            return false;
+        }
+
+        private static IReadOnlyList<Type> GetKnownEdmFileInterfaceTypes()
+        {
+            var asm = typeof(IEdmFile5).Assembly;
+            return asm.GetTypes()
+                .Where(t =>
+                    t != null &&
+                    t.IsInterface &&
+                    t.Name.StartsWith("IEdmFile", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static IReadOnlyList<Type> GetKnownEdmVaultInterfaceTypes()
+        {
+            var asm = typeof(IEdmVault5).Assembly;
+            return asm.GetTypes()
+                .Where(t =>
+                    t != null &&
+                    t.IsInterface &&
+                    t.Name.StartsWith("IEdmVault", StringComparison.OrdinalIgnoreCase))
+                .OrderBy(t => t.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         private sealed class _LocalRetrievedSignal : Exception

@@ -58,6 +58,11 @@
                    Minimum="0"
                    Maximum="100"
                    Value="0" />
+      <CheckBox x:Name="OpenPdfCheckBox"
+                Margin="16,0,0,0"
+                VerticalAlignment="Center"
+                Content="完成後檢視 PDF"
+                IsChecked="True" />
     </StackPanel>
     <TextBox x:Name="LogTextBox"
              Grid.Row="3"
