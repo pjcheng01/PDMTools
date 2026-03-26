@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using PDMTools.Models;
@@ -16,8 +18,11 @@ namespace PDMTools.Services
         public int FailCount { get; set; }
     }
 
-    public sealed class CustomPropertyTemplateRow
+    public sealed class CustomPropertyTemplateRow : INotifyPropertyChanged
     {
+        private bool _isSelectedForApply;
+        private string _lastApplyMessage = string.Empty;
+
         public string FileName { get; set; } = string.Empty;
         public string Extension { get; set; } = string.Empty;
         public string VaultFullPath { get; set; } = string.Empty;
@@ -29,6 +34,39 @@ namespace PDMTools.Services
         public string WeldmentTemplateName { get; set; } = string.Empty;
         public string Status { get; set; } = string.Empty;
         public string Message { get; set; } = string.Empty;
+
+        /// <summary>是否參與「套用範本」批次處理。</summary>
+        public bool IsSelectedForApply
+        {
+            get => _isSelectedForApply;
+            set
+            {
+                if (_isSelectedForApply == value)
+                    return;
+                _isSelectedForApply = value;
+                OnPropertyChanged();
+            }
+        }
+
+        /// <summary>最近一次套用範本操作的結果說明。</summary>
+        public string LastApplyMessage
+        {
+            get => _lastApplyMessage;
+            set
+            {
+                if (_lastApplyMessage == value)
+                    return;
+                _lastApplyMessage = value ?? string.Empty;
+                OnPropertyChanged();
+            }
+        }
+
+        public event PropertyChangedEventHandler PropertyChanged;
+
+        private void OnPropertyChanged([CallerMemberName] string propertyName = null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
     }
 
     public sealed class CustomPropertyTemplateProgressInfo
@@ -43,6 +81,12 @@ namespace PDMTools.Services
             Total = total;
             Message = message ?? string.Empty;
         }
+    }
+
+    public sealed class CustomPropertyTemplateApplyResult
+    {
+        public int SuccessCount { get; set; }
+        public int FailCount { get; set; }
     }
 
     public sealed class CustomPropertyTemplateService
@@ -78,29 +122,7 @@ namespace PDMTools.Services
             if (total == 0)
                 return result;
 
-            var swType = Type.GetTypeFromProgID("SldWorks.Application");
-            if (swType == null)
-                throw new InvalidOperationException("找不到 SolidWorks（ProgID SldWorks.Application）。請確認已安裝。");
-
-            SldWorks swApp = null;
-            var createdByThisRun = false;
-            try
-            {
-                swApp = Marshal.GetActiveObject("SldWorks.Application") as SldWorks;
-            }
-            catch (COMException)
-            {
-                swApp = null;
-            }
-
-            if (swApp == null)
-            {
-                swApp = (SldWorks)Activator.CreateInstance(swType);
-                createdByThisRun = true;
-            }
-
-            if (swApp == null)
-                throw new InvalidOperationException("無法啟動 SolidWorks。");
+            var swApp = ConnectSolidWorks(out var createdByThisRun);
 
             try
             {
@@ -239,6 +261,348 @@ namespace PDMTools.Services
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// 將範本路徑寫入勾選列的 SolidWorks 檔（一般與焊件索引皆寫入）；取檔並 check out、存檔，不 check in。
+        /// 勾選列必須為單一副檔名類型（僅 .sldprt、僅 .sldasm 或僅 .slddrw）。
+        /// </summary>
+        public CustomPropertyTemplateApplyResult ApplyTemplatesToRows(
+            IReadOnlyList<CustomPropertyTemplateRow> allRows,
+            string generalTemplatePath,
+            string weldmentTemplatePathOptional,
+            PdmBomExportService pdm,
+            IProgress<CustomPropertyTemplateProgressInfo> progress,
+            CancellationToken cancellationToken,
+            out string validationError)
+        {
+            validationError = null;
+            var result = new CustomPropertyTemplateApplyResult();
+
+            if (pdm == null)
+                throw new ArgumentNullException(nameof(pdm));
+
+            var selected = (allRows ?? Array.Empty<CustomPropertyTemplateRow>())
+                .Where(r => r != null && r.IsSelectedForApply)
+                .ToList();
+
+            if (selected.Count == 0)
+            {
+                validationError = "請至少勾選一列。";
+                return result;
+            }
+
+            var exts = selected
+                .Select(r => (r.Extension ?? string.Empty).ToLowerInvariant())
+                .Where(e => !string.IsNullOrEmpty(e))
+                .Distinct()
+                .ToList();
+
+            if (exts.Count != 1)
+            {
+                validationError =
+                    "套用對象必須為單一 SolidWorks 類型：請勿混勾 .sldprt、.sldasm、.slddrw，請只勾選其中一種副檔名。";
+                return result;
+            }
+
+            var docExt = exts[0];
+            if (docExt != ".sldprt" && docExt != ".sldasm" && docExt != ".slddrw")
+            {
+                validationError = "不支援的檔案類型。";
+                return result;
+            }
+
+            var gen = (generalTemplatePath ?? string.Empty).Trim();
+            if (string.IsNullOrEmpty(gen) || !File.Exists(gen))
+            {
+                validationError = "請指定存在的一般範本檔案。";
+                return result;
+            }
+
+            var wldRaw = (weldmentTemplatePathOptional ?? string.Empty).Trim();
+            var wld = string.IsNullOrEmpty(wldRaw) ? gen : wldRaw;
+            if (!File.Exists(wld))
+            {
+                validationError = "焊件範本路徑無效或檔案不存在。";
+                return result;
+            }
+
+            gen = Path.GetFullPath(gen);
+            wld = Path.GetFullPath(wld);
+
+            if (!ValidateTemplateExtensionsMatchDocType(docExt, gen, wld, out var ve))
+            {
+                validationError = ve;
+                return result;
+            }
+
+            var swApp = ConnectSolidWorks(out var createdByThisRun);
+
+            try
+            {
+                try
+                {
+                    if (createdByThisRun)
+                        swApp.Visible = false;
+                }
+                catch { }
+
+                var total = selected.Count;
+                for (var idx = 0; idx < total; idx++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    var row = selected[idx];
+                    var cur = idx + 1;
+                    progress?.Report(new CustomPropertyTemplateProgressInfo(
+                        cur, total, $"套用中 ({cur}/{total})：{row.FileName}"));
+
+                    var vaultPath = (row.VaultFullPath ?? string.Empty).Trim();
+                    row.LastApplyMessage = string.Empty;
+
+                    ModelDoc2 modelDoc = null;
+                    var weOpened = false;
+
+                    try
+                    {
+                        if (string.IsNullOrEmpty(vaultPath))
+                        {
+                            row.LastApplyMessage = "失敗：無 Vault 路徑。";
+                            result.FailCount++;
+                            continue;
+                        }
+
+                        var okCo = pdm.EnsureLocalFileRetrievedAndCheckedOut(vaultPath, out var localPath, out var coErr);
+                        if (!okCo || string.IsNullOrWhiteSpace(localPath) || !File.Exists(localPath))
+                        {
+                            row.LastApplyMessage = "失敗：取檔／check out：" + (coErr ?? "未知");
+                            result.FailCount++;
+                            continue;
+                        }
+
+                        var openType = GetDocTypeFromExtension(Path.GetExtension(localPath));
+                        if (openType == 0)
+                        {
+                            row.LastApplyMessage = "失敗：不支援的副檔名。";
+                            result.FailCount++;
+                            continue;
+                        }
+
+                        modelDoc = TryFindAlreadyOpenDocument(swApp, localPath);
+                        if (modelDoc == null)
+                        {
+                            var err = 0;
+                            var warn = 0;
+                            modelDoc = (ModelDoc2)swApp.OpenDoc6(
+                                localPath, openType, SwOpenSilent, "", ref err, ref warn);
+                            if (modelDoc == null)
+                            {
+                                row.LastApplyMessage = $"失敗：無法開啟（Err={err}, Warn={warn}）。";
+                                result.FailCount++;
+                                continue;
+                            }
+                            weOpened = true;
+                        }
+
+                        var ext = modelDoc.Extension as ModelDocExtension;
+                        if (ext == null)
+                        {
+                            row.LastApplyMessage = "失敗：無法取得 ModelDocExtension。";
+                            result.FailCount++;
+                            continue;
+                        }
+
+                        if (!TrySetCustomPropertyBuilderTemplates(ext, gen, wld, out var setErr))
+                        {
+                            row.LastApplyMessage = "失敗：寫入範本：" + (setErr ?? string.Empty);
+                            result.FailCount++;
+                            continue;
+                        }
+
+                        if (!TrySaveNative(modelDoc, out var saveErr))
+                        {
+                            row.LastApplyMessage = "失敗：存檔：" + (saveErr ?? string.Empty);
+                            result.FailCount++;
+                            continue;
+                        }
+
+                        row.TemplatePath = gen;
+                        row.TemplateName = Path.GetFileName(gen);
+                        row.WeldmentTemplatePath = wld;
+                        row.WeldmentTemplateName = Path.GetFileName(wld);
+                        row.Message = BuildTemplateSummaryMessage(gen, wld);
+                        row.Status = "成功";
+                        row.LastApplyMessage =
+                            "已寫入並存檔（一般與焊件索引皆已設定；原可能為未套用範本者亦已覆寫）。";
+                        result.SuccessCount++;
+                    }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception ex)
+                    {
+                        row.LastApplyMessage = "失敗：" + ex.Message;
+                        result.FailCount++;
+                    }
+                    finally
+                    {
+                        if (weOpened && modelDoc != null)
+                        {
+                            try
+                            {
+                                var title = modelDoc.GetTitle();
+                                if (!string.IsNullOrEmpty(title))
+                                    swApp.CloseDoc(title);
+                            }
+                            catch { }
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                if (createdByThisRun)
+                {
+                    try { swApp.ExitApp(); } catch { }
+                }
+            }
+
+            return result;
+        }
+
+        private static SldWorks ConnectSolidWorks(out bool createdByThisRun)
+        {
+            createdByThisRun = false;
+            var swType = Type.GetTypeFromProgID("SldWorks.Application");
+            if (swType == null)
+                throw new InvalidOperationException("找不到 SolidWorks（ProgID SldWorks.Application）。請確認已安裝。");
+
+            SldWorks swApp = null;
+            try
+            {
+                swApp = Marshal.GetActiveObject("SldWorks.Application") as SldWorks;
+            }
+            catch (COMException)
+            {
+                swApp = null;
+            }
+
+            if (swApp == null)
+            {
+                swApp = (SldWorks)Activator.CreateInstance(swType);
+                createdByThisRun = true;
+            }
+
+            if (swApp == null)
+                throw new InvalidOperationException("無法啟動 SolidWorks。");
+
+            return swApp;
+        }
+
+        private static bool ValidateTemplateExtensionsMatchDocType(
+            string docExt,
+            string generalFullPath,
+            string weldFullPath,
+            out string error)
+        {
+            error = null;
+            var g = generalFullPath.ToLowerInvariant();
+            var w = weldFullPath.ToLowerInvariant();
+            var sameFile = string.Equals(
+                Path.GetFullPath(generalFullPath),
+                Path.GetFullPath(weldFullPath),
+                StringComparison.OrdinalIgnoreCase);
+
+            switch (docExt.ToLowerInvariant())
+            {
+                case ".sldprt":
+                    if (!g.EndsWith(".prtprp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "零件檔須搭配 .prtprp 一般範本。";
+                        return false;
+                    }
+                    if (!sameFile && !w.EndsWith(".wldprp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "焊件索引須使用 .wldprp，或與一般範本指定同一檔案。";
+                        return false;
+                    }
+                    break;
+                case ".sldasm":
+                    if (!g.EndsWith(".asmprp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "組合件須搭配 .asmprp 一般範本。";
+                        return false;
+                    }
+                    if (!sameFile && !w.EndsWith(".asmprp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "第二路徑若非與一般範本相同，亦須為 .asmprp。";
+                        return false;
+                    }
+                    break;
+                case ".slddrw":
+                    if (!g.EndsWith(".drwprp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "工程圖須搭配 .drwprp 一般範本。";
+                        return false;
+                    }
+                    if (!sameFile && !w.EndsWith(".drwprp", StringComparison.OrdinalIgnoreCase))
+                    {
+                        error = "第二路徑若非與一般範本相同，亦須為 .drwprp。";
+                        return false;
+                    }
+                    break;
+                default:
+                    error = "不支援的檔案類型。";
+                    return false;
+            }
+
+            return true;
+        }
+
+        private static bool TrySetCustomPropertyBuilderTemplates(
+            ModelDocExtension ext,
+            string pathGeneral,
+            string pathWeldment,
+            out string errorMessage)
+        {
+            errorMessage = null;
+            try
+            {
+                dynamic d = ext;
+                d.CustomPropertyBuilderTemplate[false] = pathGeneral ?? string.Empty;
+                d.CustomPropertyBuilderTemplate[true] = pathWeldment ?? string.Empty;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                return false;
+            }
+        }
+
+        private static bool TrySaveNative(ModelDoc2 model, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            if (model == null)
+            {
+                errorMessage = "ModelDoc2 為 null。";
+                return false;
+            }
+
+            try
+            {
+                var errs = 0;
+                var warns = 0;
+                var ok = model.Save3(1, ref errs, ref warns);
+                if (ok)
+                    return true;
+
+                errorMessage = $"Save3 回傳 false（Errors={errs}, Warnings={warns}）。";
+                return false;
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                return false;
+            }
         }
 
         private static int GetDocTypeFromExtension(string ext)

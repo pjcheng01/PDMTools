@@ -37,6 +37,14 @@ namespace PDMTools.Services
         {
             _grid.Columns.Clear();
             _columnFilters.Clear();
+            _grid.IsReadOnly = false;
+
+            _grid.Columns.Add(new DataGridCheckBoxColumn
+            {
+                Header = "套用",
+                Width = 52,
+                Binding = new Binding("IsSelectedForApply") { Mode = BindingMode.TwoWay, UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }
+            });
 
             void Add(string key, string title, string path, double width, DataGridLengthUnitType unit, Func<object, string> getter, double minWidth = 56)
             {
@@ -46,7 +54,8 @@ namespace PDMTools.Services
                     Header = hi,
                     Binding = new Binding(path) { Mode = BindingMode.OneWay },
                     SortMemberPath = path,
-                    MinWidth = minWidth
+                    MinWidth = minWidth,
+                    IsReadOnly = true
                 };
                 col.Width = unit == DataGridLengthUnitType.Star
                     ? new DataGridLength(width, DataGridLengthUnitType.Star)
@@ -71,6 +80,17 @@ namespace PDMTools.Services
                 o => (o as CustomPropertyTemplateRow)?.Status ?? string.Empty);
             Add("Message", "訊息", "Message", 200, DataGridLengthUnitType.Pixel,
                 o => (o as CustomPropertyTemplateRow)?.Message ?? string.Empty);
+
+            var applyCol = new DataGridTextColumn
+            {
+                Header = "套用結果",
+                Binding = new Binding("LastApplyMessage") { Mode = BindingMode.OneWay },
+                SortMemberPath = "LastApplyMessage",
+                Width = new DataGridLength(220),
+                MinWidth = 120,
+                IsReadOnly = true
+            };
+            _grid.Columns.Add(applyCol);
         }
 
         public void SetupDrawingSheetFormatColumns()
@@ -86,7 +106,8 @@ namespace PDMTools.Services
                     Header = hi,
                     Binding = new Binding(path) { Mode = BindingMode.OneWay },
                     SortMemberPath = path,
-                    MinWidth = minWidth
+                    MinWidth = minWidth,
+                    IsReadOnly = true
                 };
                 col.Width = unit == DataGridLengthUnitType.Star
                     ? new DataGridLength(width, DataGridLengthUnitType.Star)
