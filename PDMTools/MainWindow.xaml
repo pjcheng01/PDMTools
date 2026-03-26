@@ -198,7 +198,7 @@
               Margin="10,0,0,0"
               Content="查詢圖頁格式路徑…"
               Click="DrawingSheetFormatButton_OnClick"
-              ToolTip="僅工程圖：查詢篩選後可見列中每張工程圖各圖頁所套用的圖頁格式（ISheet.GetTemplateName → .slddrt 路徑）。" />
+              ToolTip="僅工程圖：查詢各圖頁格式路徑（GetTemplateName）；可勾選列後套用 .slddrt（check out、SetTemplateName、存檔）。" />
       <TextBlock Text="比對階數"
                  Margin="10,0,0,0"
                  VerticalAlignment="Center"

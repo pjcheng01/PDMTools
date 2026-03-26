@@ -63,6 +63,7 @@
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
       <RowDefinition Height="*" MinHeight="180" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
@@ -114,22 +115,78 @@
               Click="ClearColumnFilters_OnClick" />
     </StackPanel>
 
+    <Grid Grid.Row="2"
+          Margin="0,0,0,8">
+      <Grid.RowDefinitions>
+        <RowDefinition Height="Auto" />
+        <RowDefinition Height="Auto" />
+      </Grid.RowDefinitions>
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="Auto" />
+        <ColumnDefinition Width="*" />
+        <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+
+      <TextBlock Grid.Row="0"
+                 Grid.Column="0"
+                 VerticalAlignment="Center"
+                 Margin="0,0,8,6"
+                 Text="圖頁格式範本" />
+      <TextBox x:Name="SheetFormatTemplatePathTextBox"
+               Grid.Row="0"
+               Grid.Column="1"
+               Margin="0,0,8,6"
+               VerticalAlignment="Center"
+               MinHeight="24"
+               ToolTip="本機 .slddrt 完整路徑；套用時會 check out 工程圖並寫入各勾選圖頁後存檔。" />
+      <Button Grid.Row="0"
+              Grid.Column="2"
+              Width="72"
+              Height="26"
+              Margin="0,0,0,6"
+              Content="瀏覽…"
+              Click="BrowseSheetFormatTemplate_OnClick" />
+
+      <StackPanel Grid.Row="1"
+                  Grid.Column="0"
+                  Grid.ColumnSpan="3"
+                  Orientation="Horizontal">
+        <Button x:Name="ApplySheetFormatButton"
+                Width="120"
+                Height="28"
+                Content="套用至勾選列"
+                Click="ApplySheetFormat_OnClick" />
+        <Button Width="100"
+                Height="28"
+                Margin="10,0,0,0"
+                Content="全選可見列"
+                Click="SelectAllVisibleRows_OnClick" />
+        <Button Width="120"
+                Height="28"
+                Margin="10,0,0,0"
+                Content="取消勾選可見列"
+                Click="ClearVisibleSelection_OnClick" />
+      </StackPanel>
+    </Grid>
+
     <DataGrid x:Name="ResultDataGrid"
-              Grid.Row="2"
+              Grid.Row="3"
               AutoGenerateColumns="False"
               ColumnHeaderStyle="{StaticResource ReportVaultDataGridColumnHeaderStyle}"
-              IsReadOnly="True"
+              IsReadOnly="False"
+              CanUserAddRows="False"
               CanUserSortColumns="True"
               CanUserReorderColumns="True"
               CanUserResizeColumns="True"
               HeadersVisibility="Column"
+              RowHeaderWidth="0"
               GridLinesVisibility="Horizontal"
               AlternatingRowBackground="#F7F7F7"
               FontSize="12"
               SelectionMode="Single" />
 
     <TextBlock x:Name="FooterTextBlock"
-               Grid.Row="3"
+               Grid.Row="4"
                Margin="0,8,0,0"
                Foreground="DimGray"
                FontSize="11"

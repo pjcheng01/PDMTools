@@ -97,6 +97,14 @@ namespace PDMTools.Services
         {
             _grid.Columns.Clear();
             _columnFilters.Clear();
+            _grid.IsReadOnly = false;
+
+            _grid.Columns.Add(new DataGridCheckBoxColumn
+            {
+                Header = "套用",
+                Width = 52,
+                Binding = new Binding("IsSelectedForApply") { Mode = BindingMode.TwoWay, UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged }
+            });
 
             void Add(string key, string title, string path, double width, DataGridLengthUnitType unit, Func<object, string> getter, double minWidth = 48)
             {
@@ -128,6 +136,17 @@ namespace PDMTools.Services
                 o => (o as DrawingSheetFormatRow)?.Status ?? string.Empty);
             Add("Message", "訊息", "Message", 200, DataGridLengthUnitType.Pixel,
                 o => (o as DrawingSheetFormatRow)?.Message ?? string.Empty);
+
+            var applyCol = new DataGridTextColumn
+            {
+                Header = "套用結果",
+                Binding = new Binding("LastApplyMessage") { Mode = BindingMode.OneWay },
+                SortMemberPath = "LastApplyMessage",
+                Width = new DataGridLength(220),
+                MinWidth = 120,
+                IsReadOnly = true
+            };
+            _grid.Columns.Add(applyCol);
         }
 
         public void SetItemsSource(IEnumerable rows)
@@ -146,6 +165,99 @@ namespace PDMTools.Services
             view?.Refresh();
             UpdateFilterUiState();
             UpdateCount(view);
+
+            // 查詢結果載入後依「欄首＋儲存格」取較大寬度，讓表格內容較易完整可見
+            _grid.Dispatcher.BeginInvoke((Action)AutoFitColumnsToContent, DispatcherPriority.ContextIdle);
+        }
+
+        /// <summary>
+        /// 欄寬取欄首與儲存格量測的較大值（欄首含漏斗按鈕範本）。
+        /// 列數不多時暫關虛擬化以量到所有列；列數過多時僅量測目前已產生的儲存格，避免卡頓。
+        /// </summary>
+        private void AutoFitColumnsToContent()
+        {
+            if (_grid == null || _grid.Columns.Count == 0)
+                return;
+
+            const int maxRowsFullMeasure = 500;
+
+            try
+            {
+                var items = _grid.ItemsSource;
+                var rowCount = GetEnumerableCount(items, maxRowsFullMeasure);
+                var useFullMeasure = rowCount >= 0 && rowCount <= maxRowsFullMeasure;
+
+                var savedVirtualization = _grid.EnableRowVirtualization;
+                if (useFullMeasure)
+                    _grid.EnableRowVirtualization = false;
+
+                try
+                {
+                    _grid.UpdateLayout();
+
+                    var n = _grid.Columns.Count;
+                    var headerWidths = new double[n];
+                    for (var i = 0; i < n; i++)
+                        _grid.Columns[i].Width = new DataGridLength(1, DataGridLengthUnitType.SizeToHeader);
+                    _grid.UpdateLayout();
+                    for (var i = 0; i < n; i++)
+                        headerWidths[i] = _grid.Columns[i].ActualWidth;
+
+                    for (var i = 0; i < n; i++)
+                        _grid.Columns[i].Width = new DataGridLength(1, DataGridLengthUnitType.SizeToCells);
+                    _grid.UpdateLayout();
+
+                    var finalW = new double[n];
+                    for (var i = 0; i < n; i++)
+                    {
+                        var col = _grid.Columns[i];
+                        var w = Math.Max(headerWidths[i], col.ActualWidth);
+                        if (w <= 0 || double.IsNaN(w) || double.IsInfinity(w))
+                            w = col.MinWidth > 0 ? col.MinWidth : 80;
+                        else
+                            w = Math.Max(w, col.MinWidth);
+                        finalW[i] = w;
+                    }
+
+                    // 最後一欄改為 * 佔滿剩餘寬度，避免右側出現 WPF 預留的空白填補區（像多餘欄）
+                    for (var i = 0; i < n - 1; i++)
+                        _grid.Columns[i].Width = new DataGridLength(finalW[i]);
+
+                    var lastCol = _grid.Columns[n - 1];
+                    lastCol.MinWidth = Math.Max(lastCol.MinWidth, finalW[n - 1]);
+                    lastCol.Width = new DataGridLength(1, DataGridLengthUnitType.Star);
+                }
+                finally
+                {
+                    if (useFullMeasure)
+                        _grid.EnableRowVirtualization = savedVirtualization;
+                }
+            }
+            catch
+            {
+                // 量測失敗時略過，不影響查詢結果
+            }
+        }
+
+        /// <param name="maxFullMeasure">列數超過此值時不再為虛擬化關閉做精確計數，傳回值會大於此值。</param>
+        private static int GetEnumerableCount(object itemsSource, int maxFullMeasure)
+        {
+            if (itemsSource == null)
+                return 0;
+            if (itemsSource is ICollection col)
+                return col.Count;
+            if (itemsSource is IEnumerable en)
+            {
+                var n = 0;
+                foreach (var _ in en)
+                {
+                    n++;
+                    if (n > maxFullMeasure)
+                        return n;
+                }
+                return n;
+            }
+            return 0;
         }
 
         public void ClearItemsSource()
