@@ -2944,80 +2944,155 @@ namespace PDMTools.Services
 
             var folderId = folder.ID;
             var t = file.GetType();
+
+            // 不同 EPDM Interop 版本：GetFileCopy / GetFileCopy2 可能存在不同簽名。
+            // 這裡不硬猜參數列，而是對所有重載逐一嘗試組裝「保守預設參數」，
+            // 呼叫後用 GetLocalPath + File.Exists 驗證是否確實取到檔案。
             var methods = t.GetMethods(BindingFlags.Instance | BindingFlags.Public)
                 .Where(m =>
-                    string.Equals(m.Name, "GetFileCopy", StringComparison.Ordinal) ||
-                    string.Equals(m.Name, "GetFileCopy2", StringComparison.Ordinal))
+                    m.Name != null &&
+                    m.Name.StartsWith("GetFileCopy", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
             foreach (var m in methods)
             {
                 var p = m.GetParameters();
-                try
+                if (p.Length == 0)
                 {
-                    if (string.Equals(m.Name, "GetFileCopy2", StringComparison.Ordinal) && p.Length >= 1)
-                    {
-                        if (p[0].ParameterType.Name.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            var args = new object[p.Length];
-                            args[0] = folder;
-                            for (var i = 1; i < p.Length; i++)
-                            {
-                                var pt = p[i].ParameterType;
-                                if (pt == typeof(int))
-                                {
-                                    args[i] = 1;
-                                }
-                                else if (pt == typeof(short))
-                                {
-                                    args[i] = (short)1;
-                                }
-                                else if (pt == typeof(long))
-                                {
-                                    args[i] = 1L;
-                                }
-                                else if (pt == typeof(uint))
-                                {
-                                    args[i] = 1u;
-                                }
-                                else if (!pt.IsByRef)
-                                {
-                                    try
-                                    {
-                                        args[i] = pt.IsValueType ? Activator.CreateInstance(pt) : null;
-                                    }
-                                    catch
-                                    {
-                                        args[i] = null;
-                                    }
-                                }
-                            }
+                    continue;
+                }
 
-                            m.Invoke(file, args);
-                            return true;
+                var args = new object[p.Length];
+                for (var i = 0; i < p.Length; i++)
+                {
+                    var pi = p[i];
+                    var pt = pi.ParameterType;
+                    var pn = (pi.Name ?? string.Empty);
+
+                    // ref / out
+                    if (pt.IsByRef)
+                    {
+                        var elem = pt.GetElementType();
+                        if (elem == null)
+                        {
+                            args[i] = null;
                         }
+                        else if (elem == typeof(int))
+                        {
+                            args[i] = 0;
+                        }
+                        else if (elem == typeof(short))
+                        {
+                            args[i] = (short)0;
+                        }
+                        else if (elem == typeof(bool))
+                        {
+                            args[i] = false;
+                        }
+                        else if (elem.IsValueType)
+                        {
+                            try
+                            {
+                                args[i] = Activator.CreateInstance(elem);
+                            }
+                            catch
+                            {
+                                args[i] = null;
+                            }
+                        }
+                        else
+                        {
+                            args[i] = null;
+                        }
+
+                        continue;
                     }
 
-                    if (string.Equals(m.Name, "GetFileCopy", StringComparison.Ordinal))
+                    // 目的資料夾參數（通常是 IEdmFolder5 或類似介面）
+                    if (pt.Name.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        if (p.Length == 1 && p[0].ParameterType == typeof(int))
+                        if (pt.IsInstanceOfType(folder) || pt.IsAssignableFrom(folder.GetType()))
                         {
-                            m.Invoke(file, new object[] { folderId });
-                            return true;
+                            args[i] = folder;
+                        }
+                        else
+                        {
+                            args[i] = folder; // 讓 Invoke 自己決定是否可轉型
+                        }
+                        continue;
+                    }
+
+                    // int/long...：盡量用 folderId（看參數名稱是否像 Folder/Dest），否則用常見選項值 1/0
+                    if (pt == typeof(int) || pt == typeof(short) || pt == typeof(long) || pt == typeof(uint))
+                    {
+                        var looksFolder = pn.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                           pn.IndexOf("Dest", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                           pn.IndexOf("Destination", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                        if (looksFolder)
+                        {
+                            args[i] = Convert.ChangeType(folderId, pt);
+                        }
+                        else
+                        {
+                            // 一般選項/旗標常見是 1（取最新/覆蓋/以預設行為）
+                            var v = 1;
+                            if (pn.IndexOf("Error", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                pn.IndexOf("Err", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                pn.IndexOf("Warning", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                v = 0;
+                            }
+
+                            args[i] = Convert.ChangeType(v, pt);
                         }
 
-                        if (p.Length == 2 && p[0].ParameterType == typeof(int))
-                        {
-                            m.Invoke(file, new object[] { folderId, 1 });
-                            return true;
-                        }
+                        continue;
+                    }
 
-                        if (p.Length == 3 && p[0].ParameterType == typeof(int))
-                        {
-                            var args = new object[] { folderId, 1, 0 };
-                            m.Invoke(file, args);
-                            return true;
-                        }
+                    if (pt == typeof(bool))
+                    {
+                        // 視為「覆蓋/啟用」等參數
+                        var v = pn.IndexOf("Override", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                pn.IndexOf("Overwrite", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                pn.IndexOf("Force", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                pn.IndexOf("Latest", StringComparison.OrdinalIgnoreCase) >= 0;
+                        args[i] = v;
+                        continue;
+                    }
+
+                    if (pt == typeof(string))
+                    {
+                        args[i] = string.Empty;
+                        continue;
+                    }
+
+                    if (!pt.IsValueType)
+                    {
+                        args[i] = null;
+                        continue;
+                    }
+
+                    // 其他值型別：使用預設值
+                    try
+                    {
+                        args[i] = Activator.CreateInstance(pt);
+                    }
+                    catch
+                    {
+                        args[i] = null;
+                    }
+                }
+
+                try
+                {
+                    m.Invoke(file, args);
+
+                    // 不論方法簽名怎樣，只要取檔成功就應該能在本機找到檔案
+                    var local = file.GetLocalPath(folderId);
+                    if (!string.IsNullOrWhiteSpace(local) && File.Exists(local))
+                    {
+                        return true;
                     }
                 }
                 catch
