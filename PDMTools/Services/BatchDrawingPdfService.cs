@@ -178,7 +178,7 @@ namespace PDMTools.Services
                             weOpened = true;
                         }
 
-                        foreach (var dep in EnumerateDependencyPaths(modelDoc))
+                        foreach (var dep in GetDependencyPaths(modelDoc))
                         {
                             cancellationToken.ThrowIfCancellationRequested();
                             if (!TryNormalizeVaultPath(dep, PdmBomExportService.VaultRootPath, out var depPath))
@@ -330,11 +330,21 @@ namespace PDMTools.Services
 
             try
             {
-                model.Extension?.ForceRebuild3(true);
+                var extObj = model.Extension;
+                if (extObj != null)
+                {
+                    var m = extObj.GetType().GetMethod(
+                        "ForceRebuild3",
+                        BindingFlags.Instance | BindingFlags.Public,
+                        null,
+                        new[] { typeof(bool) },
+                        null);
+                    m?.Invoke(extObj, new object[] { true });
+                }
             }
             catch
             {
-                // 忽略
+                // 忽略（此版 Interop 可能未宣告 ForceRebuild3）
             }
         }
 
@@ -345,14 +355,16 @@ namespace PDMTools.Services
             {
                 var ext = (ModelDocExtension)model.Extension;
                 var errs = 0;
+                var warns = 0;
                 // swSaveAsVersion_e.swSaveAsCurrentVersion = 0；swSaveAsOptions_e.swSaveAsOptions_Silent = 1
-                ext.SaveAs(pdfPath, 0, 1, ref errs);
+                // 此版 Interop 簽名為 SaveAs(string, int, int, object, ref int, ref int)
+                ext.SaveAs(pdfPath, 0, 1, Missing.Value, ref errs, ref warns);
                 if (File.Exists(pdfPath))
                 {
                     return true;
                 }
 
-                errorMessage = $"SaveAs 回傳後仍無 PDF 檔（Errors={errs}）。";
+                errorMessage = $"SaveAs 回傳後仍無 PDF 檔（Errors={errs}，Warnings={warns}）。";
                 return false;
             }
             catch (Exception ex)
@@ -417,11 +429,12 @@ namespace PDMTools.Services
             return null;
         }
 
-        private static IEnumerable<string> EnumerateDependencyPaths(ModelDoc2 model)
+        private static IReadOnlyList<string> GetDependencyPaths(ModelDoc2 model)
         {
+            var list = new List<string>();
             if (model == null)
             {
-                yield break;
+                return list;
             }
 
             try
@@ -462,11 +475,11 @@ namespace PDMTools.Services
                             {
                                 if (!string.IsNullOrWhiteSpace(s))
                                 {
-                                    yield return s.Trim();
+                                    list.Add(s.Trim());
                                 }
                             }
 
-                            yield break;
+                            return list;
                         }
 
                         if (r is object[] ob)
@@ -476,11 +489,11 @@ namespace PDMTools.Services
                                 var s = o?.ToString();
                                 if (!string.IsNullOrWhiteSpace(s))
                                 {
-                                    yield return s.Trim();
+                                    list.Add(s.Trim());
                                 }
                             }
 
-                            yield break;
+                            return list;
                         }
                     }
                 }
@@ -489,6 +502,8 @@ namespace PDMTools.Services
             {
                 // 忽略
             }
+
+            return list;
         }
 
         /// <summary>
