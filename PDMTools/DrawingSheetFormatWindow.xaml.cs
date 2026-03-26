@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using System.Windows;
 using PDMTools.Models;
@@ -8,34 +7,26 @@ using PDMTools.Services;
 
 namespace PDMTools
 {
-    public partial class CustomPropertyTemplateWindow : Window
+    public partial class DrawingSheetFormatWindow : Window
     {
-        private readonly IReadOnlyList<BomItem> _bomItems;
+        private readonly IReadOnlyList<BomItem> _drawingItems;
         private readonly PdmBomExportService _exportService;
         private readonly VaultStyleReportGridFilterHelper _gridFilter;
         private CancellationTokenSource _cts;
 
-        public CustomPropertyTemplateWindow(IReadOnlyList<BomItem> bomItems, PdmBomExportService exportService)
+        public DrawingSheetFormatWindow(IReadOnlyList<BomItem> drawingItems, PdmBomExportService exportService)
         {
             InitializeComponent();
-            _bomItems = bomItems ?? Array.Empty<BomItem>();
+            _drawingItems = drawingItems ?? Array.Empty<BomItem>();
             _exportService = exportService ?? throw new ArgumentNullException(nameof(exportService));
 
             _gridFilter = new VaultStyleReportGridFilterHelper(this, ResultDataGrid, ResultFilterCountTextBlock);
-            _gridFilter.SetupCustomPropertyTemplateColumns();
+            _gridFilter.SetupDrawingSheetFormatColumns();
 
-            var extGroups = _bomItems
-                .Where(i => !string.IsNullOrWhiteSpace(i.FullPath))
-                .Select(i => System.IO.Path.GetExtension(i.FullPath).ToLowerInvariant())
-                .Where(e => e == ".sldprt" || e == ".sldasm" || e == ".slddrw")
-                .GroupBy(e => e)
-                .OrderBy(g => g.Key)
-                .Select(g => $"{g.Key}：{g.Count()} 筆")
-                .ToList();
-
+            var n = _drawingItems.Count;
             SummaryTextBlock.Text =
-                $"將查詢目前 DataGrid 篩選後可見之 SolidWorks 檔案所套用的「自訂屬性範本」。\n"
-                + $"共 {_bomItems.Count} 筆（{string.Join("、", extGroups)}）。\n"
+                "僅處理目前 DataGrid 篩選後可見之工程圖列（IsDrawing、.slddrw），依路徑去重。\n"
+                + $"共 {n} 個工程圖檔；每張圖可有多列（每圖頁一列），透過 SolidWorks API ISheet.GetTemplateName() 讀取 .slddrt 路徑。\n"
                 + "各欄標題右側漏斗可開啟篩選（全選、清除選取、搜尋、勾選值），與主視窗 Vault BOM 相同。";
         }
 
@@ -51,10 +42,10 @@ namespace PDMTools
 
         private void Start_OnClick(object sender, RoutedEventArgs e)
         {
-            if (_bomItems.Count == 0)
+            if (_drawingItems.Count == 0)
             {
                 MessageBox.Show(this,
-                    "沒有可查詢的 SolidWorks 檔案。請確認 BOM 已抓取且篩選後有可見的 .sldprt / .sldasm / .slddrw。",
+                    "沒有可查詢的工程圖。請先抓取 BOM，並確認篩選後可見之列含工程圖。",
                     "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
@@ -69,19 +60,19 @@ namespace PDMTools
 
             try
             {
-                var svc = new CustomPropertyTemplateService();
-                var progress = new Progress<CustomPropertyTemplateProgressInfo>(p =>
+                var svc = new DrawingSheetFormatQueryService();
+                var progress = new Progress<DrawingSheetFormatProgressInfo>(p =>
                 {
                     if (p.Total > 0)
                         BatchProgressBar.Value = 100.0 * p.Current / p.Total;
                     ProgressText.Text = p.Message;
                 });
 
-                var result = svc.Run(_bomItems, _exportService, progress, _cts.Token);
+                var result = svc.Run(_drawingItems, _exportService, progress, _cts.Token);
 
                 _gridFilter.SetItemsSource(result.Rows);
                 FooterTextBlock.Text =
-                    $"完成：成功 {result.SuccessCount}，失敗 {result.FailCount}。";
+                    $"完成：成功 {result.SuccessCount} 列（圖頁），失敗 {result.FailCount} 列。";
             }
             catch (OperationCanceledException)
             {

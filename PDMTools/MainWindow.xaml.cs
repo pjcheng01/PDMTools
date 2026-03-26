@@ -1773,6 +1773,11 @@ namespace PDMTools
                 CustomPropTemplateButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
             }
 
+            if (DrawingSheetFormatButton != null)
+            {
+                DrawingSheetFormatButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
+            }
+
             if (IgpBomCompareDepthComboBox != null)
             {
                 IgpBomCompareDepthComboBox.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
@@ -1880,6 +1885,31 @@ namespace PDMTools
 
             _exportService = _exportService ?? new PdmBomExportService();
             var win = new BatchDrawingPdfWindow(drawings, _exportService)
+            {
+                Owner = this
+            };
+            win.Show();
+        }
+
+        private void DrawingSheetFormatButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_currentWorkMode != MainWorkMode.Bom)
+                return;
+
+            var drawings = GetVisibleFilteredDrawingBomItems().ToList();
+            if (drawings.Count == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "目前篩選後可見之列中沒有工程圖，或尚未抓取 BOM。",
+                    "提醒",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            _exportService = _exportService ?? new PdmBomExportService();
+            var win = new DrawingSheetFormatWindow(drawings, _exportService)
             {
                 Owner = this
             };

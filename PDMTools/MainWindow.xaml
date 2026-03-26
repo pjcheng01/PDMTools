@@ -192,6 +192,13 @@
               Content="查詢自訂屬性範本…"
               Click="CustomPropTemplateButton_OnClick"
               ToolTip="查詢目前 DataGrid 篩選後可見之 SolidWorks 檔案所套用的自訂屬性範本（CustomPropertyBuilderTemplate）。" />
+      <Button x:Name="DrawingSheetFormatButton"
+              Width="170"
+              Height="32"
+              Margin="10,0,0,0"
+              Content="查詢圖頁格式路徑…"
+              Click="DrawingSheetFormatButton_OnClick"
+              ToolTip="僅工程圖：查詢篩選後可見列中每張工程圖各圖頁所套用的圖頁格式（ISheet.GetTemplateName → .slddrt 路徑）。" />
       <TextBlock Text="比對階數"
                  Margin="10,0,0,0"
                  VerticalAlignment="Center"
