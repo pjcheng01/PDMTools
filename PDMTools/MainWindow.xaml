@@ -178,6 +178,13 @@
               Content="比對 iGP BOM…"
               Click="CompareIgpBomButton_OnClick"
               ToolTip="匯入 iGP BOM（BOMMI02.xlsx／.xlsm／.csv）與目前 Vault BOM（依右側「比對階數」之深度上限、排除工程圖列）做差異比對（Stage1/Stage2）。建議優先使用從 iGP 直接匯出的 .xlsx 以避免 CSV 編碼問題。" />
+      <Button x:Name="BatchDrawingPdfButton"
+              Width="150"
+              Height="32"
+              Margin="10,0,0,0"
+              Content="工程圖匯出 PDF…"
+              Click="BatchDrawingPdfButton_OnClick"
+              ToolTip="僅處理目前 DataGrid 篩選後可見之工程圖列：取檔、重建、匯出 PDF 至指定資料夾。" />
       <TextBlock Text="比對階數"
                  Margin="10,0,0,0"
                  VerticalAlignment="Center"

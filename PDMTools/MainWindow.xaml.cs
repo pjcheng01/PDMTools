@@ -1763,6 +1763,11 @@ namespace PDMTools
                 CompareIgpBomButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
             }
 
+            if (BatchDrawingPdfButton != null)
+            {
+                BatchDrawingPdfButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
+            }
+
             if (IgpBomCompareDepthComboBox != null)
             {
                 IgpBomCompareDepthComboBox.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
@@ -1834,6 +1839,46 @@ namespace PDMTools
             }
 
             return 3;
+        }
+
+        /// <summary>目前 DataGrid 篩選後可見之列中，標記為工程圖（IsDrawing）的項目。</summary>
+        private IEnumerable<BomItem> GetVisibleFilteredDrawingBomItems()
+        {
+            if (_bomItemsView == null)
+            {
+                return Enumerable.Empty<BomItem>();
+            }
+
+            return _bomItemsView
+                .Cast<BomItem>()
+                .Where(i => i != null && i.IsDrawing);
+        }
+
+        private void BatchDrawingPdfButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_currentWorkMode != MainWorkMode.Bom)
+            {
+                return;
+            }
+
+            var drawings = GetVisibleFilteredDrawingBomItems().ToList();
+            if (drawings.Count == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "目前篩選後可見之列中沒有工程圖，或尚未抓取 BOM。請先抓取 BOM，並確認工程圖列已顯示且未被篩選排除。",
+                    "提醒",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            _exportService = _exportService ?? new PdmBomExportService();
+            var win = new BatchDrawingPdfWindow(drawings, _exportService)
+            {
+                Owner = this
+            };
+            win.Show();
         }
 
         private async void CompareIgpBomButton_OnClick(object sender, RoutedEventArgs e)

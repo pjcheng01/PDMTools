@@ -15,7 +15,7 @@ namespace PDMTools.Services
 {
     public sealed class PdmBomExportService
     {
-        private const string VaultRootPath = @"C:\CP-PDM";
+        public const string VaultRootPath = @"C:\CP-PDM";
         // 依 PDM 變數名稱抓值（優先使用實際變數代號，而非畫面顯示標籤）
         private static readonly CardVariableSpec[] CardVariableSpecs =
         {
@@ -2872,6 +2872,161 @@ namespace PDMTools.Services
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
+        }
+
+        /// <summary>
+        /// 將 Vault 檔案取至本機視圖（GetFileCopy／GetFileCopy2），成功回傳本機完整路徑。
+        /// </summary>
+        public string EnsureLocalFileRetrieved(string vaultFullPath, out string errorMessage)
+        {
+            errorMessage = string.Empty;
+            if (string.IsNullOrWhiteSpace(vaultFullPath))
+            {
+                errorMessage = "路徑為空。";
+                return null;
+            }
+
+            try
+            {
+                var norm = Path.GetFullPath(vaultFullPath.Trim().Trim('"'));
+                if (!norm.StartsWith(VaultRootPath, StringComparison.OrdinalIgnoreCase))
+                {
+                    errorMessage = $"檔案必須位於 {VaultRootPath} 內。";
+                    return null;
+                }
+
+                EnsureVaultLogin();
+                IEdmFolder5 folder = null;
+                IEdmFile5 file = null;
+                try
+                {
+                    file = _vault.GetFileFromPath(norm, out folder);
+                    if (file == null || folder == null)
+                    {
+                        errorMessage = "Vault 找不到檔案。";
+                        return null;
+                    }
+
+                    if (!TryInvokeGetFileCopy(file, folder))
+                    {
+                        errorMessage = "無法呼叫 GetFileCopy／GetFileCopy2（API 不相容）。";
+                        return null;
+                    }
+
+                    var local = file.GetLocalPath(folder.ID);
+                    if (string.IsNullOrWhiteSpace(local) || !File.Exists(local))
+                    {
+                        errorMessage = "取檔後本機仍無檔案。";
+                        return null;
+                    }
+
+                    return local;
+                }
+                finally
+                {
+                    ComHelper.Release(file);
+                    ComHelper.Release(folder);
+                }
+            }
+            catch (Exception ex)
+            {
+                errorMessage = ex.Message;
+                return null;
+            }
+        }
+
+        private static bool TryInvokeGetFileCopy(IEdmFile5 file, IEdmFolder5 folder)
+        {
+            if (file == null || folder == null)
+            {
+                return false;
+            }
+
+            var folderId = folder.ID;
+            var t = file.GetType();
+            var methods = t.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                .Where(m =>
+                    string.Equals(m.Name, "GetFileCopy", StringComparison.Ordinal) ||
+                    string.Equals(m.Name, "GetFileCopy2", StringComparison.Ordinal))
+                .ToList();
+
+            foreach (var m in methods)
+            {
+                var p = m.GetParameters();
+                try
+                {
+                    if (string.Equals(m.Name, "GetFileCopy2", StringComparison.Ordinal) && p.Length >= 1)
+                    {
+                        if (p[0].ParameterType.Name.IndexOf("Folder", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            var args = new object[p.Length];
+                            args[0] = folder;
+                            for (var i = 1; i < p.Length; i++)
+                            {
+                                var pt = p[i].ParameterType;
+                                if (pt == typeof(int))
+                                {
+                                    args[i] = 1;
+                                }
+                                else if (pt == typeof(short))
+                                {
+                                    args[i] = (short)1;
+                                }
+                                else if (pt == typeof(long))
+                                {
+                                    args[i] = 1L;
+                                }
+                                else if (pt == typeof(uint))
+                                {
+                                    args[i] = 1u;
+                                }
+                                else if (!pt.IsByRef)
+                                {
+                                    try
+                                    {
+                                        args[i] = pt.IsValueType ? Activator.CreateInstance(pt) : null;
+                                    }
+                                    catch
+                                    {
+                                        args[i] = null;
+                                    }
+                                }
+                            }
+
+                            m.Invoke(file, args);
+                            return true;
+                        }
+                    }
+
+                    if (string.Equals(m.Name, "GetFileCopy", StringComparison.Ordinal))
+                    {
+                        if (p.Length == 1 && p[0].ParameterType == typeof(int))
+                        {
+                            m.Invoke(file, new object[] { folderId });
+                            return true;
+                        }
+
+                        if (p.Length == 2 && p[0].ParameterType == typeof(int))
+                        {
+                            m.Invoke(file, new object[] { folderId, 1 });
+                            return true;
+                        }
+
+                        if (p.Length == 3 && p[0].ParameterType == typeof(int))
+                        {
+                            var args = new object[] { folderId, 1, 0 };
+                            m.Invoke(file, args);
+                            return true;
+                        }
+                    }
+                }
+                catch
+                {
+                    // 嘗試下一個重載
+                }
+            }
+
+            return false;
         }
 
         private sealed class CardVariableSpec
