@@ -1758,6 +1758,16 @@ namespace PDMTools
                 ColumnSettingsButton.IsEnabled = !isBusy && isBomMode;
             }
 
+            if (CompareIgpBomButton != null)
+            {
+                CompareIgpBomButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
+            }
+
+            if (IgpBomCompareDepthComboBox != null)
+            {
+                IgpBomCompareDepthComboBox.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
+            }
+
             if (ClearFiltersButton != null)
             {
                 ClearFiltersButton.IsEnabled = !isBusy && isBomMode && HasActiveFilters();
@@ -1810,6 +1820,93 @@ namespace PDMTools
             }
 
             Mouse.OverrideCursor = isBusy ? Cursors.Wait : null;
+        }
+
+        /// <summary>讀取「比對 iGP BOM」所用之深度上限（2～4），異常時預設為 3。</summary>
+        private int GetIgpBomCompareMaxDepthFromUi()
+        {
+            if (IgpBomCompareDepthComboBox?.SelectedItem is System.Windows.Controls.ComboBoxItem item &&
+                item.Tag is string tag &&
+                int.TryParse(tag, NumberStyles.Integer, CultureInfo.InvariantCulture, out var d) &&
+                d >= 2 && d <= 4)
+            {
+                return d;
+            }
+
+            return 3;
+        }
+
+        private async void CompareIgpBomButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_currentWorkMode != MainWorkMode.Bom)
+            {
+                return;
+            }
+
+            if (_bomItems.Count == 0)
+            {
+                MessageBox.Show(this, "請先在 Vault BOM 模式按「開始抓取」取得資料後，再進行比對。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var dialog = new OpenFileDialog
+            {
+                Title = "選擇 iGP BOM（BOMMI02.xlsx 或 .csv）",
+                Filter = "Excel / CSV|*.xlsx;*.xlsm;*.csv|Excel (*.xlsx;*.xlsm)|*.xlsx;*.xlsm|CSV (*.csv)|*.csv|所有檔案 (*.*)|*.*"
+            };
+            if (dialog.ShowDialog(this) != true)
+            {
+                return;
+            }
+
+            SetUiBusy(true);
+            SetProgressPercent(0);
+            StatusTextBlock.Text = "正在比對 iGP BOM…";
+
+            try
+            {
+                IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
+                {
+                    SetProgressPercent(p.Percentage);
+                    StatusTextBlock.Text = p.Message;
+                });
+
+                var compareMaxDepth = GetIgpBomCompareMaxDepthFromUi();
+
+                var comparer = new IgpBomComparer();
+                var result = await comparer.CompareAsync(
+                    pdmBomItems: _bomItems.ToList(),
+                    igpBomFilePath: dialog.FileName,
+                    maxDepth: compareMaxDepth,
+                    excludeDrawings: true,
+                    progress: progress,
+                    cancellationToken: _cancellationTokenSource.Token);
+
+                var win = new IgpBomCompareWindow(result)
+                {
+                    Owner = this
+                };
+                win.Show();
+
+                StatusTextBlock.Text = $"比對完成：Stage1 {result.Stage1Rows.Count} 筆、Stage2 {result.Stage2Rows.Count} 筆（結果視窗可篩選各欄）。";
+                SetProgressPercent(0);
+            }
+            catch (OperationCanceledException)
+            {
+                MessageBox.Show(this, "作業已取消。", "取消", MessageBoxButton.OK, MessageBoxImage.Information);
+                StatusTextBlock.Text = "已取消比對。";
+                SetProgressPercent(0);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, ex.Message, "比對失敗", MessageBoxButton.OK, MessageBoxImage.Error);
+                StatusTextBlock.Text = "比對失敗。";
+                SetProgressPercent(0);
+            }
+            finally
+            {
+                SetUiBusy(false);
+            }
         }
 
         /// <summary>同步更新進度條與右側固定位置之百分比文字。</summary>

@@ -171,6 +171,28 @@
               Margin="10,0,0,0"
               Content="設定欄位..."
               Click="ColumnSettingsButton_OnClick" />
+      <Button x:Name="CompareIgpBomButton"
+              Width="140"
+              Height="32"
+              Margin="10,0,0,0"
+              Content="比對 iGP BOM…"
+              Click="CompareIgpBomButton_OnClick"
+              ToolTip="匯入 iGP BOM（BOMMI02.xlsx／.xlsm／.csv）與目前 Vault BOM（依右側「比對階數」之深度上限、排除工程圖列）做差異比對（Stage1/Stage2）。建議優先使用從 iGP 直接匯出的 .xlsx 以避免 CSV 編碼問題。" />
+      <TextBlock Text="比對階數"
+                 Margin="10,0,0,0"
+                 VerticalAlignment="Center"
+                 Foreground="DimGray" />
+      <ComboBox x:Name="IgpBomCompareDepthComboBox"
+                Width="72"
+                Height="32"
+                Margin="6,0,0,0"
+                SelectedIndex="1"
+                VerticalContentAlignment="Center"
+                ToolTip="比對時納入的階層深度上限（2～4 階）。根階仍不參與比對鍵，僅供上下文顯示。">
+        <ComboBoxItem Tag="2" Content="2 階" />
+        <ComboBoxItem Tag="3" Content="3 階" />
+        <ComboBoxItem Tag="4" Content="4 階" />
+      </ComboBox>
       <Button x:Name="ClearFiltersButton"
               Width="120"
               Height="32"
