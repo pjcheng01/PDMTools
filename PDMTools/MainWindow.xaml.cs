@@ -1768,6 +1768,11 @@ namespace PDMTools
                 BatchDrawingPdfButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
             }
 
+            if (CustomPropTemplateButton != null)
+            {
+                CustomPropTemplateButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
+            }
+
             if (IgpBomCompareDepthComboBox != null)
             {
                 IgpBomCompareDepthComboBox.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
@@ -1879,6 +1884,41 @@ namespace PDMTools
                 Owner = this
             };
             win.Show();
+        }
+
+        private void CustomPropTemplateButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_currentWorkMode != MainWorkMode.Bom)
+                return;
+
+            var items = GetVisibleFilteredBomItems().ToList();
+            if (items.Count == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "目前篩選後可見之列中沒有 SolidWorks 檔案（.sldprt / .sldasm / .slddrw），或尚未抓取 BOM。",
+                    "提醒",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            _exportService = _exportService ?? new PdmBomExportService();
+            var win = new CustomPropertyTemplateWindow(items, _exportService)
+            {
+                Owner = this
+            };
+            win.Show();
+        }
+
+        private IEnumerable<BomItem> GetVisibleFilteredBomItems()
+        {
+            if (_bomItemsView == null)
+                return Enumerable.Empty<BomItem>();
+
+            return _bomItemsView
+                .Cast<BomItem>()
+                .Where(i => i != null && !string.IsNullOrWhiteSpace(i.FullPath));
         }
 
         private async void CompareIgpBomButton_OnClick(object sender, RoutedEventArgs e)
