@@ -1935,6 +1935,39 @@ namespace PDMTools
                 .Where(i => i != null && i.IsDrawing);
         }
 
+        private void BatchWorkflowTransitionButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_currentWorkMode != MainWorkMode.Bom)
+            {
+                return;
+            }
+
+            var items = GetVisibleFilteredBomItems().ToList();
+            if (items.Count == 0)
+            {
+                MessageBox.Show(
+                    this,
+                    "目前篩選後可見之列中沒有檔案路徑，或尚未抓取 BOM。",
+                    "提醒",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+                return;
+            }
+
+            var paths = items
+                .Select(i => i.FullPath?.Trim() ?? string.Empty)
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            _exportService = _exportService ?? new PdmBomExportService();
+            var win = new BatchWorkflowTransitionWindow(paths, _exportService)
+            {
+                Owner = this
+            };
+            win.Show();
+        }
+
         private void BatchDrawingPdfButton_OnClick(object sender, RoutedEventArgs e)
         {
             if (_currentWorkMode != MainWorkMode.Bom)

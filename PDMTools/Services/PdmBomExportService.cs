@@ -2608,6 +2608,15 @@ namespace PDMTools.Services
                                             StringComparer.OrdinalIgnoreCase)
             };
 
+        /// <summary>
+        /// 確保已登入 Vault，供其他服務（例如批次轉狀態）共用同一 COM 連線。
+        /// </summary>
+        public IEdmVault5 GetVault()
+        {
+            EnsureVaultLogin();
+            return _vault;
+        }
+
         private void EnsureVaultLogin()
         {
             if (_vault.IsLoggedIn)
