@@ -38,7 +38,6 @@ namespace PDMTools
         /// <summary>參考稽核預覽篩選：路徑是否落在 S 槽（不區分大小寫）。</summary>
         private const string ReferenceAuditSDriveFolderPrefix = @"S:\";
         private PdmBomExportService _exportService;
-        private readonly CancellationTokenSource _cancellationTokenSource = new CancellationTokenSource();
         private readonly ObservableCollection<BomItem> _bomItems = new ObservableCollection<BomItem>();
         private readonly CardVariableLookupConverter _cardVariableConverter = new CardVariableLookupConverter();
         private readonly Dictionary<string, ColumnFilterState> _columnFilters =
@@ -1055,20 +1054,40 @@ namespace PDMTools
 
             SetUiBusy(true);
             SetProgressPercent(0);
+
+            var prevProgressPanelVis = MainProgressPanel != null
+                ? MainProgressPanel.Visibility
+                : Visibility.Visible;
+            if (MainProgressPanel != null)
+                MainProgressPanel.Visibility = Visibility.Collapsed;
+
+            var mainWasEnabled = IsEnabled;
+            IsEnabled = false;
+
+            using var cts = new CancellationTokenSource();
+            BomGrabProgressWindow progressWin = null;
             IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
             {
-                SetProgressPercent(p.Percentage);
-                StatusTextBlock.Text = p.Message;
+                if (progressWin != null)
+                    Dispatcher.Invoke(() => progressWin.UpdateProgress(p));
             });
 
             try
             {
+                progressWin = new BomGrabProgressWindow(cts)
+                {
+                    Title = "顯示工程圖 · 作業中",
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen
+                };
+                progressWin.Show();
+                progressWin.Activate();
+
                 _exportService = _exportService ?? new PdmBomExportService();
                 var withDrawings = await _exportService.AppendDrawingItemsAsync(
                     _rawBomItems,
                     _activeCardVarNames,
                     progress,
-                    _cancellationTokenSource.Token);
+                    cts.Token);
 
                 _bomItemsWithDrawings = withDrawings.ToList();
 
@@ -1089,15 +1108,29 @@ namespace PDMTools
             catch (OperationCanceledException)
             {
                 ShowDrawingsToggle.IsChecked = false;
-                MessageBox.Show(this, "作業已取消。", "取消", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(
+                    progressWin != null ? (Window)progressWin : this,
+                    "作業已取消。",
+                    "取消",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
                 ShowDrawingsToggle.IsChecked = false;
-                MessageBox.Show(this, ex.Message, "錯誤", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(
+                    progressWin != null ? (Window)progressWin : this,
+                    ex.Message,
+                    "錯誤",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
             }
             finally
             {
+                progressWin?.CloseFromOwner();
+                IsEnabled = mainWasEnabled;
+                if (MainProgressPanel != null)
+                    MainProgressPanel.Visibility = prevProgressPanelVis;
                 SetUiBusy(false);
             }
         }
@@ -1616,14 +1649,32 @@ namespace PDMTools
             SetUiBusy(true);
             SetProgressPercent(0);
 
+            var prevProgressPanelVis = MainProgressPanel != null
+                ? MainProgressPanel.Visibility
+                : Visibility.Visible;
+            if (MainProgressPanel != null)
+                MainProgressPanel.Visibility = Visibility.Collapsed;
+
+            var mainWasEnabled = IsEnabled;
+            IsEnabled = false;
+
+            using var cts = new CancellationTokenSource();
+            BomGrabProgressWindow progressWin = null;
             IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
             {
-                SetProgressPercent(p.Percentage);
-                StatusTextBlock.Text = p.Message;
+                if (progressWin != null)
+                    Dispatcher.Invoke(() => progressWin.UpdateProgress(p));
             });
 
             try
             {
+                progressWin = new BomGrabProgressWindow(cts)
+                {
+                    WindowStartupLocation = WindowStartupLocation.CenterScreen
+                };
+                progressWin.Show();
+                progressWin.Activate();
+
                 _exportService = _exportService ?? new PdmBomExportService();
                 progress.Report(new ProgressInfo(0, "開始抓取 BOM 與資料卡…"));
                 _bomItems.Clear();
@@ -1636,7 +1687,7 @@ namespace PDMTools
                     maxBomLayerDepth,
                     configurationName,
                     progress,
-                    _cancellationTokenSource.Token);
+                    cts.Token);
 
                 // 快取純零組件 BOM，重置工程圖快取與 Toggle 狀態
                 _rawBomItems           = items.ToList();
@@ -1664,14 +1715,28 @@ namespace PDMTools
             }
             catch (OperationCanceledException)
             {
-                MessageBox.Show(this, "作業已取消。", "取消", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(
+                    progressWin != null ? (Window)progressWin : this,
+                    "作業已取消。",
+                    "取消",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, ex.Message, "錯誤", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(
+                    progressWin != null ? (Window)progressWin : this,
+                    ex.Message,
+                    "錯誤",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error);
             }
             finally
             {
+                progressWin?.CloseFromOwner();
+                IsEnabled = mainWasEnabled;
+                if (MainProgressPanel != null)
+                    MainProgressPanel.Visibility = prevProgressPanelVis;
                 SetUiBusy(false);
             }
         }
@@ -1681,6 +1746,7 @@ namespace PDMTools
             SetUiBusy(true);
             SetProgressPercent(0);
 
+            using var cts = new CancellationTokenSource();
             IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
             {
                 SetProgressPercent(p.Percentage);
@@ -1698,7 +1764,7 @@ namespace PDMTools
                     _activeCardVarNames,
                     outputPath,
                     progress,
-                    _cancellationTokenSource.Token);
+                    cts.Token);
 
                 MessageBox.Show(this, $"匯出成功！\n{outputPath}", "完成", MessageBoxButton.OK, MessageBoxImage.Information);
             }
@@ -1832,6 +1898,11 @@ namespace PDMTools
             {
                 ReloadConfigurationsButton.IsEnabled = !isBusy && isBomMode && !_configurationLoadInProgress &&
                                                        TryGetNormalizedAssemblyPathFromUi(out _);
+            }
+
+            if (BomDataGrid != null)
+            {
+                BomDataGrid.IsEnabled = !isBusy && isBomMode;
             }
 
             Mouse.OverrideCursor = isBusy ? Cursors.Wait : null;
@@ -1978,6 +2049,7 @@ namespace PDMTools
             SetProgressPercent(0);
             StatusTextBlock.Text = "正在比對 iGP BOM…";
 
+            using var compareCts = new CancellationTokenSource();
             try
             {
                 IProgress<ProgressInfo> progress = new Progress<ProgressInfo>(p =>
@@ -1995,7 +2067,7 @@ namespace PDMTools
                     maxDepth: compareMaxDepth,
                     excludeDrawings: true,
                     progress: progress,
-                    cancellationToken: _cancellationTokenSource.Token);
+                    cancellationToken: compareCts.Token);
 
                 var win = new IgpBomCompareWindow(result)
                 {

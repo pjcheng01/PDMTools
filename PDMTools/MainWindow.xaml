@@ -279,8 +279,9 @@
                     Content="顯示工程圖"
                     IsEnabled="False"
                     Click="ShowDrawingsToggle_Click" />
-      <!-- 作業進度：百分比固定顯示在列條右側（不隨填滿區移動） -->
-      <StackPanel Margin="12,4,0,0"
+      <!-- 作業進度：百分比固定顯示在列條右側（不隨填滿區移動）；Vault BOM 抓取時改由獨立視窗顯示，此區會隱藏 -->
+      <StackPanel x:Name="MainProgressPanel"
+                  Margin="12,4,0,0"
                   VerticalAlignment="Top"
                   Orientation="Vertical">
         <TextBlock Text="作業進度"

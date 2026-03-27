@@ -1,0 +1,49 @@
+<Window x:Class="PDMTools.BomGrabProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Vault BOM 作業中"
+        Width="460"
+        SizeToContent="Height"
+        MinHeight="140"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+  <Grid Margin="18">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
+    </Grid.RowDefinitions>
+
+    <TextBlock x:Name="MessageTextBlock"
+               Grid.Row="0"
+               TextWrapping="Wrap"
+               FontSize="12"
+               Margin="0,0,0,10" />
+
+    <ProgressBar x:Name="BatchProgressBar"
+                 Grid.Row="1"
+                 Height="22"
+                 Minimum="0"
+                 Maximum="100"
+                 Value="0" />
+
+    <TextBlock x:Name="PercentTextBlock"
+               Grid.Row="2"
+               Margin="0,6,0,0"
+               HorizontalAlignment="Right"
+               Foreground="DimGray"
+               FontSize="12"
+               Text="0%" />
+
+    <Button Grid.Row="3"
+            Width="88"
+            Height="28"
+            Margin="0,14,0,0"
+            HorizontalAlignment="Right"
+            Content="中斷"
+            IsCancel="True"
+            Click="Interrupt_OnClick" />
+  </Grid>
+</Window>
