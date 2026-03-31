@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Text;
 
 namespace PDMTools.Models
 {
@@ -6,37 +7,24 @@ namespace PDMTools.Models
     public sealed class PdmTransitionOption
     {
         public int TransitionId { get; set; }
+        /// <summary>顯示用（優先 moName，見 Analyze）。</summary>
         public string TransitionName { get; set; } = string.Empty;
+        /// <summary>結構欄位 <c>mbsTransitionName</c> 原文；<c>CreateTree</c>／<c>ChangeState2</c> 宜優先使用。</summary>
+        public string MbsTransitionNameRaw { get; set; } = string.Empty;
         public string TargetStateName { get; set; } = string.Empty;
 
         /// <summary>
-        /// 供 ComboBox 顯示：以「轉換後的目標狀態」為主（與 Explorer「State／本機狀態」一致）；
-        /// 「動作」為 PDM 轉換名稱（常與流程或步驟同名，勿與「Workflow」欄混淆）。
+        /// 供 ComboBox 顯示：僅使用與 PDM Interop 結構（如 EdmChangeStateTransitionInfo）一致的原始欄位名稱。
         /// </summary>
         public string DisplayText
         {
             get
             {
-                var idSeg = TransitionId != 0 ? $"[轉換 ID {TransitionId}] " : string.Empty;
-                var action = (TransitionName ?? string.Empty).Trim();
-                var target = (TargetStateName ?? string.Empty).Trim();
-
-                if (!string.IsNullOrEmpty(target) && !string.IsNullOrEmpty(action))
-                {
-                    return idSeg + "目標狀態「" + target + "」｜動作：" + action;
-                }
-
-                if (!string.IsNullOrEmpty(target))
-                {
-                    return idSeg + "目標狀態「" + target + "」";
-                }
-
-                if (!string.IsNullOrEmpty(action))
-                {
-                    return idSeg + "動作：" + action + "（僅轉換名；未解析到目標狀態，易與流程名混淆）";
-                }
-
-                return TransitionId != 0 ? $"[轉換 ID {TransitionId}]" : "(無法讀取轉換／目標狀態)";
+                var sb = new StringBuilder();
+                sb.Append("mlTransitionID=").Append(TransitionId);
+                sb.Append("; mbsTransitionName=").Append(TransitionName ?? string.Empty);
+                sb.Append("; mbsTargetStateName=").Append(TargetStateName ?? string.Empty);
+                return sb.ToString();
             }
         }
     }

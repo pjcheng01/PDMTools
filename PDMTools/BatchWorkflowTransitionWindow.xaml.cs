@@ -84,7 +84,10 @@ namespace PDMTools
                 {
                     TextWrapping = TextWrapping.Wrap,
                     FontWeight = FontWeights.SemiBold,
-                    Text = $"工作流程：{g.WorkflowName}\n狀態：{g.StateName}（ID {g.StateId}）\n檔案數：{g.FilePaths.Count}"
+                    Text = "mbsWorkflowName=" + (g.WorkflowName ?? string.Empty)
+                        + "\nmlStateID=" + g.StateId
+                        + "; mbsStateName=" + (g.StateName ?? string.Empty)
+                        + "\nFilePaths.Count=" + g.FilePaths.Count
                 };
                 Grid.SetRow(title, 0);
                 Grid.SetColumnSpan(title, 2);
@@ -92,7 +95,7 @@ namespace PDMTools
 
                 var lbl = new TextBlock
                 {
-                    Text = "轉換：",
+                    Text = "EdmChangeStateTransitionInfo:",
                     VerticalAlignment = VerticalAlignment.Center,
                     Margin = new Thickness(0, 8, 8, 0)
                 };
