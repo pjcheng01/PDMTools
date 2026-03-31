@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -154,10 +155,13 @@ namespace PDMTools
                 return;
             }
 
-            var hwnd = new WindowInteropHelper(this).Handle.ToInt32();
+            // PDM 對話框須傳入有效父視窗 hwnd（不可為 0）。EnsureHandle 強制建立 HWND，避免尚未配置時 Handle 仍為 0。
+            var helper = new WindowInteropHelper(this);
+            helper.EnsureHandle();
+            var hwnd = helper.Handle.ToInt32();
             if (hwnd == 0)
             {
-                MessageBox.Show(this, "視窗控制代碼尚未就緒，請稍候再試。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                MessageBox.Show(this, "無法取得有效視窗控制代碼（hwnd），PDM Change State 對話框可能無法正常執行。請稍候再試。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
             }
 
@@ -173,6 +177,9 @@ namespace PDMTools
             }
 
             AppendLog("── 開始執行轉換 ──");
+            AppendLog($"[診斷] hwnd={hwnd}（若為 0 則父視窗無效，PDM 對話框可能無法正確執行）");
+            AppendLog($"[診斷] Thread ApartmentState={Thread.CurrentThread.GetApartmentState()}（PDM COM 須為 STA；若為 MTA 請勿在背景執行緒呼叫）");
+
             foreach (var (group, combo) in _groupCombos)
             {
                 if (group.FilePaths.Count == 0)

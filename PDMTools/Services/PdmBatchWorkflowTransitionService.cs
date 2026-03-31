@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Threading;
 using EPDM.Interop.epdm;
 using PDMTools.Models;
 using PDMTools.Utils;
@@ -26,6 +27,18 @@ namespace PDMTools.Services
         /// </summary>
         private const int EdmChg_ShowErrorsFlag = 2;
 
+        /// <summary>
+        /// PDM COM 須在 STA 執行緒呼叫；MTA（如 Task.Run／預設 Thread）會導致對話框無法正確回傳結果。
+        /// </summary>
+        private static void EnsureStaThreadForPdmCom()
+        {
+            if (Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
+            {
+                throw new InvalidOperationException(
+                    "PDM COM 必須在 STA（單執行緒公寓）執行緒上呼叫。請勿在 Task.Run、ThreadPool 或預設為 MTA 的執行緒執行；請於 WPF UI 執行緒呼叫（必要時對控制項使用 Dispatcher）。");
+            }
+        }
+
         public BatchWorkflowTransitionAnalyzeResult Analyze(
             IReadOnlyList<string> fullPaths,
             IEdmVault5 vault)
@@ -35,6 +48,8 @@ namespace PDMTools.Services
             {
                 throw new ArgumentNullException(nameof(vault));
             }
+
+            EnsureStaThreadForPdmCom();
 
             var vault7 = vault as IEdmVault7;
             if (vault7 == null)
@@ -95,6 +110,8 @@ namespace PDMTools.Services
         /// </summary>
         public IReadOnlyList<PdmTransitionOption> ListNextTransitionableStatesForPath(IEdmVault5 vault, string fullPath)
         {
+            EnsureStaThreadForPdmCom();
+
             var vault7 = vault as IEdmVault7;
             if (vault7 == null)
             {
@@ -118,6 +135,15 @@ namespace PDMTools.Services
                 throw new ArgumentNullException(nameof(transition));
             }
 
+            EnsureStaThreadForPdmCom();
+
+            if (parentWindowHandle == 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(parentWindowHandle),
+                    "父視窗 hwnd 不可為 0。PDM「Change State」對話框需要有效視窗控制代碼，否則可能無法正確執行或無回傳結果。");
+            }
+
             var result = new BatchWorkflowTransitionExecuteResult();
             var vault7 = vault as IEdmVault7;
             if (vault7 == null)
@@ -125,9 +151,9 @@ namespace PDMTools.Services
                 throw new InvalidOperationException("無法將 Vault 轉型為 IEdmVault7。");
             }
 
-            // PDF：單檔時可優先 IEdmVault5.ChangeState(…, EdmSelItem[], mlTransitionID, …)。
-            // 多檔請一律走下方 EdmUtil_BatchChangeState：Vault.ChangeState 與批次「Change State」對話框組合在行為上較難與 ChangeState2 一致。
-            if (transition.TransitionId != 0 && filePathsInGroup.Count == 1)
+            // 有轉換 ID 時優先 IEdmVault5.ChangeState(…, EdmSelItem[], mlTransitionID, …, EdmChg_ShowDialog, hwnd)。
+            // 與 Explorer／工作流程設定一致，可顯示「Change State」原生對話框（含多檔同一 State 之一併轉換）。
+            if (transition.TransitionId != 0)
             {
                 var vaultCs = TryVaultChangeStateWithNativeDialog(
                     vault,
@@ -214,19 +240,63 @@ namespace PDMTools.Services
                     return result;
                 }
 
-                // 官方批次流程：CreateTree → ChangeState2。ChangeState2 會顯示「Change State」對話框（含檔案清單、註解），
-                // 並在使用者按下 Change State 後寫入 Vault。請勿再先呼叫 ShowDlg：與 ChangeState2 內建 UI 重疊時，
-                // 第二次呼叫常導致對話框立刻關閉或轉換未套用。
+                // PDM 2023：ShowDlg 在使用者按下「Change State」時已在內部完成轉換並回傳 true。
+                // 較舊版本：ShowDlg 僅收集使用者輸入（密碼、備註），實際寫入仍須 ChangeState2。
+                // 修正策略：ShowDlg 前先快照目前狀態名稱，ShowDlg 回傳後比對狀態是否改變。
+                //           狀態已變 → ShowDlg 已完成，跳過 ChangeState2（避免重複提交 0x8004028F）。
+                //           狀態未變 → 呼叫 ChangeState2 實際執行（較舊版本行為）。
+                //           此做法不依賴 TargetStateName 欄位，相容各版 Interop。
+
+                // 快照對話框前的狀態名稱
+                var stateNameBeforeDialog = GetCurrentStateNameSnapshot(vault, filePathsInGroup);
+
                 TryInvokeCreateTree(batchObj, transitionName);
-                InvokeChangeState2(batchObj, parentWindowHandle, transitionName);
+
+                var dlgOk = TryInvokeShowDlg(batchObj, parentWindowHandle);
+                if (dlgOk == false)
+                {
+                    foreach (var p in filePathsInGroup)
+                    {
+                        result.Rows.Add(new BatchWorkflowTransitionExecuteRow
+                        {
+                            FullPath = p,
+                            Success = false,
+                            Message = "使用者已取消，狀態未變更。"
+                        });
+                    }
+
+                    return result;
+                }
+
+                // 比對狀態是否已從對話框前的快照改變（不依賴 TargetStateName）
+                var doneByShowDlg = HasStateChangedSince(vault, filePathsInGroup, stateNameBeforeDialog);
+
+                if (!doneByShowDlg)
+                {
+                    // ShowDlg 僅收集輸入，需 ChangeState2 實際執行轉換（較舊版本行為）；
+                    // 或 Interop 無 ShowDlg（dlgOk==null）時僅能 ChangeState2。
+                    InvokeChangeState2(batchObj, parentWindowHandle, transitionName);
+                }
 
                 foreach (var p in filePathsInGroup)
                 {
+                    string successMsg;
+                    if (dlgOk == null)
+                    {
+                        successMsg = "已透過批次變更狀態（ChangeState2）完成轉換。";
+                    }
+                    else
+                    {
+                        successMsg = doneByShowDlg
+                            ? "已透過 ShowDlg 完成轉換（PDM 2023）。"
+                            : "已透過 ShowDlg + ChangeState2 完成轉換。";
+                    }
+
                     result.Rows.Add(new BatchWorkflowTransitionExecuteRow
                     {
                         FullPath = p,
                         Success = true,
-                        Message = "已透過批次變更狀態（ChangeState2）完成轉換。"
+                        Message = successMsg
                     });
                 }
             }
@@ -269,6 +339,102 @@ namespace PDMTools.Services
         }
 
         /// <summary>
+        /// 取得群組內第一個檔案的當前狀態名稱（供 ShowDlg 前快照使用）。
+        /// 無法取得時回傳空字串。
+        /// </summary>
+        private static string GetCurrentStateNameSnapshot(
+            IEdmVault5 vault,
+            IReadOnlyList<string> filePaths)
+        {
+            if (vault == null || filePaths == null || filePaths.Count == 0)
+            {
+                return string.Empty;
+            }
+
+            IEdmFolder5 folder = null;
+            IEdmFile5 file = null;
+            IEdmState5 state = null;
+            try
+            {
+                file = vault.GetFileFromPath(filePaths[0], out folder);
+                if (file == null || folder == null)
+                {
+                    return string.Empty;
+                }
+
+                state = TryGetFileStateFromFile(file, folder);
+                if (state == null)
+                {
+                    return string.Empty;
+                }
+
+                return state.Name?.Trim() ?? string.Empty;
+            }
+            catch
+            {
+                return string.Empty;
+            }
+            finally
+            {
+                ComHelper.Release(state);
+                ComHelper.Release(file);
+                ComHelper.Release(folder);
+            }
+        }
+
+        /// <summary>
+        /// 比對群組內第一個檔案的當前狀態名稱與 <paramref name="stateNameBefore"/> 是否不同。
+        /// 不同代表 ShowDlg 已在內部完成轉換（PDM 2023），可跳過 ChangeState2。
+        /// <paramref name="stateNameBefore"/> 為空時保守回傳 false（讓 ChangeState2 繼續執行）。
+        /// </summary>
+        private static bool HasStateChangedSince(
+            IEdmVault5 vault,
+            IReadOnlyList<string> filePaths,
+            string stateNameBefore)
+        {
+            if (string.IsNullOrWhiteSpace(stateNameBefore))
+            {
+                return false;
+            }
+
+            IEdmFolder5 folder = null;
+            IEdmFile5 file = null;
+            IEdmState5 state = null;
+            try
+            {
+                file = vault.GetFileFromPath(filePaths[0], out folder);
+                if (file == null || folder == null)
+                {
+                    return false;
+                }
+
+                state = TryGetFileStateFromFile(file, folder);
+                if (state == null)
+                {
+                    return false;
+                }
+
+                var currentName = state.Name?.Trim() ?? string.Empty;
+
+                // 狀態名稱與對話框前不同 → ShowDlg 已完成轉換
+                return !string.Equals(
+                    currentName,
+                    stateNameBefore,
+                    StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                ComHelper.Release(state);
+                ComHelper.Release(file);
+                ComHelper.Release(folder);
+            }
+        }
+
+        /// <summary>
         /// 將 COM 錯誤碼轉成可讀說明（若 Vault 提供 GetErrorMessage）。
         /// </summary>
         private static string FormatPdmExecuteException(IEdmVault5 vault, Exception ex)
@@ -283,14 +449,38 @@ namespace PDMTools.Services
                 return ex.Message;
             }
 
-            var hex = "HRESULT 0x" + unchecked((uint)com.ErrorCode).ToString("X8");
+            var hr = unchecked((uint)com.ErrorCode);
+            var hex = "HRESULT 0x" + hr.ToString("X8");
             var vaultMsg = TryGetVaultErrorMessage(vault, com.ErrorCode);
-            if (!string.IsNullOrWhiteSpace(vaultMsg))
+            var baseMsg = !string.IsNullOrWhiteSpace(vaultMsg)
+                ? ex.Message + " — " + vaultMsg + "（" + hex + "）"
+                : ex.Message + "（" + hex + "）";
+
+            return AppendPdmComErrorHints(hr, baseMsg, ex.Message);
+        }
+
+        /// <summary>
+        /// hwnd／STA 正常時仍可能失敗：補充 0x8004028F（密碼／工作階段）與 XML 附帶訊息的說明。
+        /// </summary>
+        private static string AppendPdmComErrorHints(uint hr, string formattedMessage, string originalComMessage)
+        {
+            var msg = formattedMessage ?? string.Empty;
+            var om = originalComMessage ?? string.Empty;
+
+            if (hr == 0x8004028F)
             {
-                return ex.Message + " — " + vaultMsg + "（" + hex + "）";
+                msg +=
+                    " 【說明】若您在檔案總管手動轉換亦不需輸入密碼，此 HRESULT 常非「密碼打錯」，而可能是：API 重複提交、ShowDlg 與 ChangeState2 組合與版次不相容、或 COM 工作階段與 Explorer 不同步。建議重新登入 Vault、更新 PDM 用戶端與 EPDM.Interop 版次一致，並請管理員查看伺服器日誌；仍無法排除時可改以僅 IEdmVault5.ChangeState（原生對話框）單一路徑測試。";
             }
 
-            return ex.Message + "（" + hex + "）";
+            if (om.IndexOf("XML", StringComparison.OrdinalIgnoreCase) >= 0
+                || om.IndexOf("最上層", StringComparison.Ordinal) >= 0)
+            {
+                msg +=
+                    " 【說明】XML 相關字樣常為 PDM 在認證或轉換失敗時一併回傳，未必代表檔案內容損毀。";
+            }
+
+            return msg;
         }
 
         private static string TryGetVaultErrorMessage(IEdmVault5 vault, int errorCode)
@@ -409,7 +599,7 @@ namespace PDMTools.Services
 
         /// <summary>
         /// 對應文件：IEdmVault5.ChangeState(EdmObjectType.EdmObject_File, EdmSelItem[], transitionId, comment, flags, hwnd)。
-        /// 使用 EdmChg_ShowDialog|EdmChg_ShowErrors；以 COMException 區分取消與失敗。
+        /// 使用 EdmChg_ShowDialog|EdmChg_ShowErrors；以 COMException 區分取消、失敗與改走批次後備（如 0x8004028F）。
         /// </summary>
         private static VaultChangeStateOutcome TryVaultChangeStateWithNativeDialog(
             IEdmVault5 vault,
@@ -447,6 +637,7 @@ namespace PDMTools.Services
                 }
             }
 
+            // EdmChg_ShowDialog | EdmChg_ShowErrors（與技術文件一致）；Interop 未匯出列舉時以常數 OR。
             var flags = EdmChg_ShowDialogFlag | EdmChg_ShowErrorsFlag;
 
             // NuGet Interop 的 IEdmVault5 常未宣告 ChangeState，執行期仍可能存在；僅能晚繫結呼叫。
@@ -475,6 +666,9 @@ namespace PDMTools.Services
                     case 0x80040009:
                         detailMessage = "檔案已 Check Out，請先 Check In 後再試。";
                         return VaultChangeStateOutcome.Failed;
+                    case 0x8004028F:
+                        // 密碼／認證等：改試批次 API（ShowDlg + ChangeState2）
+                        return VaultChangeStateOutcome.UseBatchFallback;
                     default:
                         detailMessage = $"未預期的錯誤：0x{hr:X8} — {ex.Message}";
                         return VaultChangeStateOutcome.Failed;
@@ -2096,6 +2290,74 @@ namespace PDMTools.Services
         }
 
         /// <summary>
+        /// COM／VARIANT_BOOL（常為 short：0 假、-1 真）轉成 bool。
+        /// </summary>
+        private static bool CoerceComVariantBool(object r)
+        {
+            if (r == null || r is DBNull)
+            {
+                return false;
+            }
+
+            if (r is bool b)
+            {
+                return b;
+            }
+
+            try
+            {
+                return Convert.ToBoolean(r);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// 顯示批次變更狀態對話方塊。若介面無此方法則回傳 null。
+        /// </summary>
+        private static bool? TryInvokeShowDlg(object batchObj, int parentHwnd)
+        {
+            if (batchObj == null)
+            {
+                return null;
+            }
+
+            try
+            {
+                dynamic b = batchObj;
+                var ret = b.ShowDlg(parentHwnd);
+                return CoerceComVariantBool(ret);
+            }
+            catch
+            {
+                // 改試介面反射
+            }
+
+            foreach (var iface in new[] { typeof(IEdmBatchChangeState6), typeof(IEdmBatchChangeState5), typeof(IEdmBatchChangeState4) })
+            {
+                var m = iface.GetMethod("ShowDlg", new[] { typeof(int) });
+                if (m == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var ret = m.Invoke(batchObj, new object[] { parentHwnd });
+                    return CoerceComVariantBool(ret);
+                }
+                catch
+                {
+                    // try next
+                }
+            }
+
+            return null;
+        }
+
+        /// <summary>
         /// 批次結構 <see cref="EdmChangeStateTransitionInfo"/> 可能同時含 <c>moName</c> 與 <c>mbsTransitionName</c>：
         /// SOLIDWORKS 官方範例以 <c>moName</c> 作為顯示字串；Explorer「變更狀態」亦較接近 <c>moName</c>。
         /// <c>mbsTransitionName</c> 有時為另一組命名（例如與圖示標籤「01_…」／<c>moName</c> 不同）。
@@ -2660,6 +2922,4 @@ namespace PDMTools.Services
             }
         }
     }
-}
-
 }
