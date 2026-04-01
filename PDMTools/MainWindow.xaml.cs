@@ -1028,13 +1028,16 @@ namespace PDMTools
             }
 
             var assemblyPath = AssemblyPathTextBox.Text?.Trim() ?? string.Empty;
+            var baseName = string.IsNullOrWhiteSpace(assemblyPath)
+                ? string.Empty
+                : Path.GetFileNameWithoutExtension(assemblyPath);
             var saveDialog = new SaveFileDialog
             {
-                Title = "儲存 BOM Excel",
+                Title = "儲存 BOM Excel（全部資料）",
                 Filter = "Excel Workbook (*.xlsx)|*.xlsx",
-                FileName = string.IsNullOrWhiteSpace(assemblyPath)
+                FileName = string.IsNullOrWhiteSpace(baseName)
                     ? $"BOM_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx"
-                    : $"BOM_{Path.GetFileNameWithoutExtension(assemblyPath)}_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
+                    : $"BOM_{baseName}_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
                 AddExtension = true,
                 OverwritePrompt = true
             };
@@ -1042,7 +1045,37 @@ namespace PDMTools
             if (saveDialog.ShowDialog(this) != true)
                 return;
 
-            await RunExportExcelOnlyAsync(saveDialog.FileName);
+            await RunExportExcelCoreAsync(_bomItems.ToList(), saveDialog.FileName, "全部");
+        }
+
+        private async void ExportFilteredButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            if (_bomItemsView == null || GetFilteredCount() == 0)
+            {
+                MessageBox.Show(this, "目前篩選後無可見資料，請調整篩選條件後再試。", "提醒", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            var filteredItems = _bomItemsView.Cast<BomItem>().ToList();
+            var assemblyPath = AssemblyPathTextBox.Text?.Trim() ?? string.Empty;
+            var baseName = string.IsNullOrWhiteSpace(assemblyPath)
+                ? string.Empty
+                : Path.GetFileNameWithoutExtension(assemblyPath);
+            var saveDialog = new SaveFileDialog
+            {
+                Title = $"儲存 BOM Excel（篩選結果，共 {filteredItems.Count} 筆）",
+                Filter = "Excel Workbook (*.xlsx)|*.xlsx",
+                FileName = string.IsNullOrWhiteSpace(baseName)
+                    ? $"BOM_Filtered_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx"
+                    : $"BOM_{baseName}_Filtered_{DateTime.Now:yyyyMMdd_HHmmss}.xlsx",
+                AddExtension = true,
+                OverwritePrompt = true
+            };
+
+            if (saveDialog.ShowDialog(this) != true)
+                return;
+
+            await RunExportExcelCoreAsync(filteredItems, saveDialog.FileName, $"篩選後 {filteredItems.Count} 筆");
         }
 
         private async void ShowDrawingsToggle_Click(object sender, RoutedEventArgs e)
@@ -1763,7 +1796,14 @@ namespace PDMTools
             }
         }
 
-        private async Task RunExportExcelOnlyAsync(string outputPath)
+        /// <summary>
+        /// 匯出 Excel 核心方法。<paramref name="items"/> 可傳全部資料或篩選後子集；
+        /// <paramref name="label"/> 僅用於完成訊息顯示（如「全部」或「篩選後 N 筆」）。
+        /// </summary>
+        private async Task RunExportExcelCoreAsync(
+            IReadOnlyList<BomItem> items,
+            string outputPath,
+            string label = "")
         {
             SetUiBusy(true);
             SetProgressPercent(0);
@@ -1778,17 +1818,23 @@ namespace PDMTools
             try
             {
                 _exportService = _exportService ?? new PdmBomExportService();
-                progress.Report(new ProgressInfo(0, "正在匯出 Excel..."));
+                var displayLabel = string.IsNullOrWhiteSpace(label) ? string.Empty : $"（{label}）";
+                progress.Report(new ProgressInfo(0, $"正在匯出 Excel{displayLabel}..."));
 
                 await _exportService.ExportToExcelAsync(
-                    _bomItems.ToList(),
+                    items is List<BomItem> list ? list : items.ToList(),
                     _activeFixedColumns,   // null = 全部固定欄；有值 = 僅匯出使用者選取的
                     _activeCardVarNames,
                     outputPath,
                     progress,
                     cts.Token);
 
-                MessageBox.Show(this, $"匯出成功！\n{outputPath}", "完成", MessageBoxButton.OK, MessageBoxImage.Information);
+                MessageBox.Show(
+                    this,
+                    $"匯出成功{displayLabel}！共 {items.Count} 筆。\n{outputPath}",
+                    "完成",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
             }
             catch (OperationCanceledException)
             {
@@ -1812,7 +1858,7 @@ namespace PDMTools
                 SetUiBusy(false);
                 SetProgressPercent(0);
                 StatusTextBlock.Text = _bomItems.Count > 0
-                    ? $"抓取完成，共 {_bomItems.Count} 筆。（可匯出 xlsx）"
+                    ? $"共 {_bomItems.Count} 筆，目前顯示 {GetFilteredCount()} 筆。"
                     : "就緒";
             }
         }
@@ -1839,6 +1885,11 @@ namespace PDMTools
             if (ExportButton != null)
             {
                 ExportButton.IsEnabled = !isBusy && isBomMode;
+            }
+
+            if (ExportFilteredButton != null)
+            {
+                ExportFilteredButton.IsEnabled = !isBusy && isBomMode && _bomItems.Count > 0;
             }
 
             if (ColumnSettingsButton != null)

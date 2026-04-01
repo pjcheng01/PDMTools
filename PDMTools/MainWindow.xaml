@@ -164,7 +164,16 @@
               Height="32"
               Margin="10,0,0,0"
               Content="匯出 xlsx"
-              Click="ExportButton_OnClick" />
+              Click="ExportButton_OnClick"
+              ToolTip="匯出全部 BOM 資料（不受篩選影響）。" />
+      <Button x:Name="ExportFilteredButton"
+              Width="150"
+              Height="32"
+              Margin="4,0,0,0"
+              Content="匯出篩選結果 xlsx"
+              Click="ExportFilteredButton_OnClick"
+              IsEnabled="False"
+              ToolTip="僅匯出目前表格篩選後可見的資料列（欄位篩選＋快速篩選皆套用）。" />
       <Button x:Name="ColumnSettingsButton"
               Width="120"
               Height="32"
