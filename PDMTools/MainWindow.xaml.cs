@@ -752,6 +752,8 @@ namespace PDMTools
             _currentWorkMode = mode;
             var isBomMode = mode == MainWorkMode.Bom;
 
+            if (BomParamPanel != null)
+                BomParamPanel.Visibility = isBomMode ? Visibility.Visible : Visibility.Collapsed;
             if (BomOperationsPanel != null)
                 BomOperationsPanel.Visibility = isBomMode ? Visibility.Visible : Visibility.Collapsed;
             if (BomModeContentPanel != null)
@@ -759,8 +761,12 @@ namespace PDMTools
             if (ReferenceAuditModeContentPanel != null)
                 ReferenceAuditModeContentPanel.Visibility = isBomMode ? Visibility.Collapsed : Visibility.Visible;
 
-            if (BrowseButton != null)
-                BrowseButton.Content = isBomMode ? "導入文件" : "選擇檔案";
+            // BrowseButton 採用 StackPanel 內容（圖示+文字），只更新文字 TextBlock（索引 1）。
+            if (BrowseButton?.Content is StackPanel browsePanel && browsePanel.Children.Count >= 2
+                && browsePanel.Children[1] is TextBlock browseLabel)
+            {
+                browseLabel.Text = isBomMode ? "開啟檔案" : "選擇檔案";
+            }
 
             if (!isBomMode)
             {
