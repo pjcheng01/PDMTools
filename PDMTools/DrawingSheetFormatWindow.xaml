@@ -72,23 +72,31 @@
                Grid.Row="0"
                Margin="0,0,0,10"
                TextWrapping="Wrap"
-               Foreground="DimGray" />
+               Foreground="#FF6B7280" />
 
     <StackPanel Grid.Row="1"
                 Orientation="Horizontal"
                 Margin="0,0,0,8">
       <Button x:Name="StartButton"
-              Width="100"
+              Width="120"
               Height="30"
-              Content="開始查詢"
-              Click="Start_OnClick" />
+              Click="Start_OnClick">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE896;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+          <TextBlock Text="開始查詢" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Button>
       <Button x:Name="CancelButton"
-              Width="100"
+              Width="110"
               Height="30"
               Margin="10,0,0,0"
-              Content="取消"
               IsEnabled="False"
-              Click="Cancel_OnClick" />
+              Click="Cancel_OnClick">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE711;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+          <TextBlock Text="取消" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Button>
       <ProgressBar x:Name="BatchProgressBar"
                    Width="220"
                    Height="22"
@@ -99,11 +107,11 @@
       <TextBlock x:Name="ProgressText"
                  Margin="10,0,0,0"
                  VerticalAlignment="Center"
-                 Foreground="DimGray" />
+                 Foreground="#FF6B7280" />
       <TextBlock x:Name="ResultFilterCountTextBlock"
                  Margin="16,0,8,0"
                  VerticalAlignment="Center"
-                 Foreground="DimGray"
+                 Foreground="#FF6B7280"
                  FontSize="11"
                  MinWidth="96"
                  TextAlignment="Right" />
@@ -131,6 +139,7 @@
                  Grid.Column="0"
                  VerticalAlignment="Center"
                  Margin="0,0,8,6"
+                 Foreground="#FF374151"
                  Text="圖頁格式範本" />
       <TextBox x:Name="SheetFormatTemplatePathTextBox"
                Grid.Row="0"
@@ -141,21 +150,29 @@
                ToolTip="本機 .slddrt 完整路徑；套用時會 check out 工程圖並寫入各勾選圖頁後存檔。" />
       <Button Grid.Row="0"
               Grid.Column="2"
-              Width="72"
+              Width="88"
               Height="26"
               Margin="0,0,0,6"
-              Content="瀏覽…"
-              Click="BrowseSheetFormatTemplate_OnClick" />
+              Click="BrowseSheetFormatTemplate_OnClick">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xED25;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+          <TextBlock Text="瀏覽…" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Button>
 
       <StackPanel Grid.Row="1"
                   Grid.Column="0"
                   Grid.ColumnSpan="3"
                   Orientation="Horizontal">
         <Button x:Name="ApplySheetFormatButton"
-                Width="120"
+                Width="130"
                 Height="28"
-                Content="套用至勾選列"
-                Click="ApplySheetFormat_OnClick" />
+                Click="ApplySheetFormat_OnClick">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8AB;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+            <TextBlock Text="套用至勾選列" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
         <Button Width="100"
                 Height="28"
                 Margin="10,0,0,0"
@@ -169,27 +186,39 @@
       </StackPanel>
     </Grid>
 
-    <DataGrid x:Name="ResultDataGrid"
-              Grid.Row="3"
-              AutoGenerateColumns="False"
-              ColumnHeaderStyle="{StaticResource ReportVaultDataGridColumnHeaderStyle}"
-              IsReadOnly="False"
-              CanUserAddRows="False"
-              CanUserSortColumns="True"
-              CanUserReorderColumns="True"
-              CanUserResizeColumns="True"
-              HeadersVisibility="Column"
-              RowHeaderWidth="0"
-              GridLinesVisibility="Horizontal"
-              AlternatingRowBackground="#F7F7F7"
-              FontSize="12"
-              SelectionMode="Single" />
+    <Border Grid.Row="3"
+            BorderBrush="#FFE5E7EB"
+            BorderThickness="1"
+            CornerRadius="8"
+            ClipToBounds="True">
+      <DataGrid x:Name="ResultDataGrid"
+                AutoGenerateColumns="False"
+                ColumnHeaderStyle="{StaticResource ReportVaultDataGridColumnHeaderStyle}"
+                IsReadOnly="False"
+                CanUserAddRows="False"
+                CanUserSortColumns="True"
+                CanUserReorderColumns="True"
+                CanUserResizeColumns="True"
+                HeadersVisibility="Column"
+                RowHeaderWidth="0"
+                GridLinesVisibility="Horizontal"
+                AlternatingRowBackground="#F7F7F7"
+                FontSize="12"
+                SelectionMode="Single"
+                BorderThickness="0" />
+    </Border>
 
-    <TextBlock x:Name="FooterTextBlock"
-               Grid.Row="4"
-               Margin="0,8,0,0"
-               Foreground="DimGray"
-               FontSize="11"
-               TextWrapping="Wrap" />
+    <Border Grid.Row="4"
+            Background="#FFF3F4F6"
+            BorderBrush="#FFE5E7EB"
+            BorderThickness="1"
+            CornerRadius="8"
+            Margin="0,6,0,0"
+            Padding="10,6">
+      <TextBlock x:Name="FooterTextBlock"
+                 Foreground="#FF6B7280"
+                 FontSize="11"
+                 TextWrapping="Wrap" />
+    </Border>
   </Grid>
 </Window>

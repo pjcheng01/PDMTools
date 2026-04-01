@@ -96,62 +96,81 @@
             <TextBlock x:Name="SummaryText"
                        Grid.Column="0"
                        TextWrapping="Wrap"
-                       Foreground="DimGray"
+                       Foreground="#FF6B7280"
                        FontSize="12" />
             <Button x:Name="SaveResultButton"
                     Grid.Column="1"
-                    Width="108"
-                    Height="28"
+                    Width="130"
+                    Height="30"
                     Margin="12,0,0,0"
                     VerticalAlignment="Top"
-                    Content="儲存結果…"
                     Click="SaveResultButton_OnClick"
-                    ToolTip="將完整比對結果匯出為 Excel（建議）或 JSON；內容為全部列，不受欄位篩選影響。Excel 為「表格」格式並套用與視窗相同之列文字顏色。" />
+                    ToolTip="將完整比對結果匯出為 Excel（建議）或 JSON；內容為全部列，不受欄位篩選影響。Excel 為「表格」格式並套用與視窗相同之列文字顏色。">
+              <StackPanel Orientation="Horizontal">
+                <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8DE;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                <TextBlock Text="儲存結果…" VerticalAlignment="Center"/>
+              </StackPanel>
+            </Button>
         </Grid>
 
         <TabControl x:Name="MainTabControl"
                     Grid.Row="1"
                     SelectionChanged="MainTabControl_OnSelectionChanged">
             <TabItem Header="Stage1：料號彙總">
-                <DataGrid x:Name="Stage1Grid"
-                          AutoGenerateColumns="False"
-                          IsReadOnly="True"
-                          CanUserAddRows="False"
-                          CanUserDeleteRows="False"
-                          HeadersVisibility="Column"
-                          GridLinesVisibility="All"
-                          Margin="0,8,0,0"
-                          AlternationCount="2"
-                          RowBackground="White"
-                          AlternatingRowBackground="#FFF5F5F5"
-                          RowStyle="{StaticResource IgpCompareDataGridRowStyle}" />
+                <Border BorderBrush="#FFE5E7EB"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        ClipToBounds="True"
+                        Margin="0,8,0,0">
+                    <DataGrid x:Name="Stage1Grid"
+                              AutoGenerateColumns="False"
+                              ColumnHeaderStyle="{StaticResource IgpCompareDataGridColumnHeaderStyle}"
+                              IsReadOnly="True"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="All"
+                              AlternationCount="2"
+                              RowBackground="White"
+                              AlternatingRowBackground="#FFF5F5F5"
+                              RowStyle="{StaticResource IgpCompareDataGridRowStyle}"
+                              BorderThickness="0" />
+                </Border>
             </TabItem>
             <TabItem Header="Stage2：父子結構">
-                <DataGrid x:Name="Stage2Grid"
-                          AutoGenerateColumns="False"
-                          IsReadOnly="True"
-                          CanUserAddRows="False"
-                          CanUserDeleteRows="False"
-                          HeadersVisibility="Column"
-                          GridLinesVisibility="All"
-                          Margin="0,8,0,0"
-                          AlternationCount="2"
-                          RowBackground="White"
-                          AlternatingRowBackground="#FFF5F5F5"
-                          RowStyle="{StaticResource IgpCompareDataGridRowStyle}" />
+                <Border BorderBrush="#FFE5E7EB"
+                        BorderThickness="1"
+                        CornerRadius="8"
+                        ClipToBounds="True"
+                        Margin="0,8,0,0">
+                    <DataGrid x:Name="Stage2Grid"
+                              AutoGenerateColumns="False"
+                              ColumnHeaderStyle="{StaticResource IgpCompareDataGridColumnHeaderStyle}"
+                              IsReadOnly="True"
+                              CanUserAddRows="False"
+                              CanUserDeleteRows="False"
+                              HeadersVisibility="Column"
+                              GridLinesVisibility="All"
+                              AlternationCount="2"
+                              RowBackground="White"
+                              AlternatingRowBackground="#FFF5F5F5"
+                              RowStyle="{StaticResource IgpCompareDataGridRowStyle}"
+                              BorderThickness="0" />
+                </Border>
             </TabItem>
         </TabControl>
 
         <Border Grid.Row="2"
-                Background="#FFF5F5F5"
-                BorderBrush="#FFE0E0E0"
-                BorderThickness="0,1,0,0"
-                Padding="10,8"
-                Margin="0,8,0,0">
+                Background="#FFF3F4F6"
+                BorderBrush="#FFE5E7EB"
+                BorderThickness="1"
+                CornerRadius="8"
+                Margin="0,6,0,0"
+                Padding="10,6">
             <TextBlock x:Name="DisplayStatsTextBlock"
                        TextWrapping="Wrap"
                        FontSize="12"
-                       Foreground="#FF424242" />
+                       Foreground="#FF374151" />
         </Border>
     </Grid>
 </Window>

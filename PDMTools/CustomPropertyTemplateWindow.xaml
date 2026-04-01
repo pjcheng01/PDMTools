@@ -72,23 +72,31 @@
                Grid.Row="0"
                Margin="0,0,0,10"
                TextWrapping="Wrap"
-               Foreground="DimGray" />
+               Foreground="#FF6B7280" />
 
     <StackPanel Grid.Row="1"
                 Orientation="Horizontal"
                 Margin="0,0,0,8">
       <Button x:Name="StartButton"
-              Width="100"
+              Width="120"
               Height="30"
-              Content="開始查詢"
-              Click="Start_OnClick" />
+              Click="Start_OnClick">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE896;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+          <TextBlock Text="開始查詢" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Button>
       <Button x:Name="CancelButton"
-              Width="100"
+              Width="110"
               Height="30"
               Margin="10,0,0,0"
-              Content="取消"
               IsEnabled="False"
-              Click="Cancel_OnClick" />
+              Click="Cancel_OnClick">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE711;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+          <TextBlock Text="取消" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Button>
       <ProgressBar x:Name="BatchProgressBar"
                    Width="220"
                    Height="22"
@@ -99,11 +107,11 @@
       <TextBlock x:Name="ProgressText"
                  Margin="10,0,0,0"
                  VerticalAlignment="Center"
-                 Foreground="DimGray" />
+                 Foreground="#FF6B7280" />
       <TextBlock x:Name="ResultFilterCountTextBlock"
                  Margin="16,0,8,0"
                  VerticalAlignment="Center"
-                 Foreground="DimGray"
+                 Foreground="#FF6B7280"
                  FontSize="11"
                  MinWidth="96"
                  TextAlignment="Right" />
@@ -132,6 +140,7 @@
                  Grid.Column="0"
                  VerticalAlignment="Center"
                  Margin="0,0,8,6"
+                 Foreground="#FF374151"
                  Text="一般範本" />
       <TextBox x:Name="GeneralTemplatePathTextBox"
                Grid.Row="0"
@@ -141,11 +150,15 @@
                MinHeight="24" />
       <Button Grid.Row="0"
               Grid.Column="2"
-              Width="72"
+              Width="88"
               Height="26"
               Margin="0,0,0,6"
-              Content="瀏覽…"
-              Click="BrowseGeneralTemplate_OnClick" />
+              Click="BrowseGeneralTemplate_OnClick">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xED25;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+          <TextBlock Text="瀏覽…" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Button>
 
       <TextBlock Grid.Row="1"
                  Grid.Column="0"
@@ -153,6 +166,7 @@
                  Margin="0,0,8,6"
                  TextWrapping="Wrap"
                  MaxWidth="120"
+                 Foreground="#FF374151"
                  Text="焊件範本（選填）" />
       <TextBox x:Name="WeldmentTemplatePathTextBox"
                Grid.Row="1"
@@ -163,21 +177,29 @@
                ToolTip="空白則與一般範本相同；零件另選時須為 .wldprp。" />
       <Button Grid.Row="1"
               Grid.Column="2"
-              Width="72"
+              Width="88"
               Height="26"
               Margin="0,0,0,6"
-              Content="瀏覽…"
-              Click="BrowseWeldmentTemplate_OnClick" />
+              Click="BrowseWeldmentTemplate_OnClick">
+        <StackPanel Orientation="Horizontal">
+          <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xED25;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+          <TextBlock Text="瀏覽…" VerticalAlignment="Center"/>
+        </StackPanel>
+      </Button>
 
       <StackPanel Grid.Row="2"
                   Grid.Column="0"
                   Grid.ColumnSpan="3"
                   Orientation="Horizontal">
         <Button x:Name="ApplyTemplateButton"
-                Width="120"
+                Width="130"
                 Height="28"
-                Content="套用至勾選列"
-                Click="ApplyTemplate_OnClick" />
+                Click="ApplyTemplate_OnClick">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE8AB;" FontSize="12" Margin="0,0,5,0" VerticalAlignment="Center"/>
+            <TextBlock Text="套用至勾選列" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
         <Button Width="100"
                 Height="28"
                 Margin="10,0,0,0"
@@ -191,27 +213,39 @@
       </StackPanel>
     </Grid>
 
-    <DataGrid x:Name="ResultDataGrid"
-              Grid.Row="3"
-              AutoGenerateColumns="False"
-              ColumnHeaderStyle="{StaticResource ReportVaultDataGridColumnHeaderStyle}"
-              IsReadOnly="False"
-              CanUserAddRows="False"
-              CanUserSortColumns="True"
-              CanUserReorderColumns="True"
-              CanUserResizeColumns="True"
-              HeadersVisibility="Column"
-              RowHeaderWidth="0"
-              GridLinesVisibility="Horizontal"
-              AlternatingRowBackground="#F7F7F7"
-              FontSize="12"
-              SelectionMode="Single" />
+    <Border Grid.Row="3"
+            BorderBrush="#FFE5E7EB"
+            BorderThickness="1"
+            CornerRadius="8"
+            ClipToBounds="True">
+      <DataGrid x:Name="ResultDataGrid"
+                AutoGenerateColumns="False"
+                ColumnHeaderStyle="{StaticResource ReportVaultDataGridColumnHeaderStyle}"
+                IsReadOnly="False"
+                CanUserAddRows="False"
+                CanUserSortColumns="True"
+                CanUserReorderColumns="True"
+                CanUserResizeColumns="True"
+                HeadersVisibility="Column"
+                RowHeaderWidth="0"
+                GridLinesVisibility="Horizontal"
+                AlternatingRowBackground="#F7F7F7"
+                FontSize="12"
+                SelectionMode="Single"
+                BorderThickness="0" />
+    </Border>
 
-    <TextBlock x:Name="FooterTextBlock"
-               Grid.Row="4"
-               Margin="0,8,0,0"
-               Foreground="DimGray"
-               FontSize="11"
-               TextWrapping="Wrap" />
+    <Border Grid.Row="4"
+            Background="#FFF3F4F6"
+            BorderBrush="#FFE5E7EB"
+            BorderThickness="1"
+            CornerRadius="8"
+            Margin="0,6,0,0"
+            Padding="10,6">
+      <TextBlock x:Name="FooterTextBlock"
+                 Foreground="#FF6B7280"
+                 FontSize="11"
+                 TextWrapping="Wrap" />
+    </Border>
   </Grid>
 </Window>
