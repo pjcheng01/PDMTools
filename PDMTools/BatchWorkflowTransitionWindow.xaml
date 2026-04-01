@@ -11,9 +11,10 @@
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
-      <RowDefinition Height="*" MinHeight="180" />
       <RowDefinition Height="Auto" />
-      <RowDefinition Height="120" />
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="5" />
+      <RowDefinition Height="*" MinHeight="80" />
     </Grid.RowDefinitions>
     <TextBlock x:Name="SummaryTextBlock"
                Grid.Row="0"
@@ -37,17 +38,26 @@
     </StackPanel>
     <ScrollViewer Grid.Row="2"
                   VerticalScrollBarVisibility="Auto"
-                  HorizontalScrollBarVisibility="Auto">
+                  HorizontalScrollBarVisibility="Auto"
+                  MaxHeight="320">
       <StackPanel x:Name="GroupsPanel" />
     </ScrollViewer>
     <TextBlock x:Name="SkippedTextBlock"
                Grid.Row="3"
-               Margin="0,0,0,6"
+               Margin="0,4,0,0"
                TextWrapping="Wrap"
                FontSize="11"
                Foreground="DarkOrange" />
+    <GridSplitter Grid.Row="4"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Center"
+                  Height="5"
+                  Background="LightGray"
+                  ResizeDirection="Rows"
+                  ResizeBehavior="PreviousAndNext"
+                  Cursor="SizeNS" />
     <TextBox x:Name="LogTextBox"
-             Grid.Row="4"
+             Grid.Row="5"
              IsReadOnly="True"
              AcceptsReturn="True"
              TextWrapping="Wrap"

@@ -240,21 +240,28 @@ namespace PDMTools.Services
                     return result;
                 }
 
-                // PDM 2023：ShowDlg 在使用者按下「Change State」時已在內部完成轉換並回傳 true。
-                // 較舊版本：ShowDlg 僅收集使用者輸入（密碼、備註），實際寫入仍須 ChangeState2。
-                // 修正策略：ShowDlg 前先快照目前狀態名稱，ShowDlg 回傳後比對狀態是否改變。
-                //           狀態已變 → ShowDlg 已完成，跳過 ChangeState2（避免重複提交 0x8004028F）。
-                //           狀態未變 → 呼叫 ChangeState2 實際執行（較舊版本行為）。
-                //           此做法不依賴 TargetStateName 欄位，相容各版 Interop。
-
-                // 快照對話框前的狀態名稱
-                var stateNameBeforeDialog = GetCurrentStateNameSnapshot(vault, filePathsInGroup);
-
-                TryInvokeCreateTree(batchObj, transitionName);
-
-                var dlgOk = TryInvokeShowDlg(batchObj, parentWindowHandle);
-                if (dlgOk == false)
+                // 官方 API 正確序列：AddFile → CreateTree → ShowDlg → ChangeState2(hwnd, password)
+                // 參考：SolidWorks PDM API BatchChangeFileStates 官方範例
+                var createTreeOk = TryInvokeCreateTree(batchObj, transitionName);
+                if (!createTreeOk)
                 {
+                    foreach (var p in filePathsInGroup)
+                    {
+                        result.Rows.Add(new BatchWorkflowTransitionExecuteRow
+                        {
+                            FullPath = p,
+                            Success = false,
+                            Message = $"CreateTree 失敗，無法初始化批次轉換物件（transition={transitionName}）。"
+                        });
+                    }
+
+                    return result;
+                }
+
+                var showDlgResult = TryInvokeShowDlg(batchObj, parentWindowHandle);
+                if (showDlgResult == false)
+                {
+                    // 使用者在「Change State」對話框按下取消
                     foreach (var p in filePathsInGroup)
                     {
                         result.Rows.Add(new BatchWorkflowTransitionExecuteRow
@@ -268,29 +275,12 @@ namespace PDMTools.Services
                     return result;
                 }
 
-                // 比對狀態是否已從對話框前的快照改變（不依賴 TargetStateName）
-                var doneByShowDlg = HasStateChangedSince(vault, filePathsInGroup, stateNameBeforeDialog);
-
-                if (!doneByShowDlg)
-                {
-                    // ShowDlg 僅收集輸入，需 ChangeState2 實際執行轉換（較舊版本行為）；
-                    // 或 Interop 無 ShowDlg（dlgOk==null）時僅能 ChangeState2。
-                    InvokeChangeState2(batchObj, parentWindowHandle, transitionName);
-                }
+                // ChangeState2 第二個參數為密碼（非轉換名稱）；工作流程不需密碼時傳空字串
+                InvokeChangeState2(batchObj, parentWindowHandle);
 
                 foreach (var p in filePathsInGroup)
                 {
-                    string successMsg;
-                    if (dlgOk == null)
-                    {
-                        successMsg = "已透過批次變更狀態（ChangeState2）完成轉換。";
-                    }
-                    else
-                    {
-                        successMsg = doneByShowDlg
-                            ? "已透過 ShowDlg 完成轉換（PDM 2023）。"
-                            : "已透過 ShowDlg + ChangeState2 完成轉換。";
-                    }
+                    var successMsg = $"已透過 CreateTree + ShowDlg + ChangeState2 完成轉換。[transition={transitionName}]";
 
                     result.Rows.Add(new BatchWorkflowTransitionExecuteRow
                     {
@@ -336,102 +326,6 @@ namespace PDMTools.Services
             }
 
             return result;
-        }
-
-        /// <summary>
-        /// 取得群組內第一個檔案的當前狀態名稱（供 ShowDlg 前快照使用）。
-        /// 無法取得時回傳空字串。
-        /// </summary>
-        private static string GetCurrentStateNameSnapshot(
-            IEdmVault5 vault,
-            IReadOnlyList<string> filePaths)
-        {
-            if (vault == null || filePaths == null || filePaths.Count == 0)
-            {
-                return string.Empty;
-            }
-
-            IEdmFolder5 folder = null;
-            IEdmFile5 file = null;
-            IEdmState5 state = null;
-            try
-            {
-                file = vault.GetFileFromPath(filePaths[0], out folder);
-                if (file == null || folder == null)
-                {
-                    return string.Empty;
-                }
-
-                state = TryGetFileStateFromFile(file, folder);
-                if (state == null)
-                {
-                    return string.Empty;
-                }
-
-                return state.Name?.Trim() ?? string.Empty;
-            }
-            catch
-            {
-                return string.Empty;
-            }
-            finally
-            {
-                ComHelper.Release(state);
-                ComHelper.Release(file);
-                ComHelper.Release(folder);
-            }
-        }
-
-        /// <summary>
-        /// 比對群組內第一個檔案的當前狀態名稱與 <paramref name="stateNameBefore"/> 是否不同。
-        /// 不同代表 ShowDlg 已在內部完成轉換（PDM 2023），可跳過 ChangeState2。
-        /// <paramref name="stateNameBefore"/> 為空時保守回傳 false（讓 ChangeState2 繼續執行）。
-        /// </summary>
-        private static bool HasStateChangedSince(
-            IEdmVault5 vault,
-            IReadOnlyList<string> filePaths,
-            string stateNameBefore)
-        {
-            if (string.IsNullOrWhiteSpace(stateNameBefore))
-            {
-                return false;
-            }
-
-            IEdmFolder5 folder = null;
-            IEdmFile5 file = null;
-            IEdmState5 state = null;
-            try
-            {
-                file = vault.GetFileFromPath(filePaths[0], out folder);
-                if (file == null || folder == null)
-                {
-                    return false;
-                }
-
-                state = TryGetFileStateFromFile(file, folder);
-                if (state == null)
-                {
-                    return false;
-                }
-
-                var currentName = state.Name?.Trim() ?? string.Empty;
-
-                // 狀態名稱與對話框前不同 → ShowDlg 已完成轉換
-                return !string.Equals(
-                    currentName,
-                    stateNameBefore,
-                    StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-            finally
-            {
-                ComHelper.Release(state);
-                ComHelper.Release(file);
-                ComHelper.Release(folder);
-            }
         }
 
         /// <summary>
@@ -2230,20 +2124,24 @@ namespace PDMTools.Services
             }
         }
 
-        private static void InvokeChangeState2(object batchObj, int parentHwnd, string transitionName)
+        /// <summary>
+        /// ChangeState2 的第二參數為「使用者密碼」（官方 API 範例：bsPasswd），並非轉換名稱。
+        /// 轉換已由 <see cref="TryInvokeCreateTree"/> 設定；此處傳入空字串表示不需密碼。
+        /// </summary>
+        private static void InvokeChangeState2(object batchObj, int parentHwnd)
         {
-            // 新版 Interop 第三參數為 <see cref="EdmCallback"/>，非字串；無進度回呼時傳 null。
+            const string password = "";   // 工作流程不需密碼時傳空字串
             EdmCallback callback = null;
             switch (batchObj)
             {
                 case IEdmBatchChangeState6 b6:
-                    b6.ChangeState2(parentHwnd, transitionName, callback);
+                    b6.ChangeState2(parentHwnd, password, callback);
                     return;
                 case IEdmBatchChangeState5 b5:
-                    b5.ChangeState2(parentHwnd, transitionName, callback);
+                    b5.ChangeState2(parentHwnd, password, callback);
                     return;
                 case IEdmBatchChangeState4 b4:
-                    b4.ChangeState2(parentHwnd, transitionName, callback);
+                    b4.ChangeState2(parentHwnd, password, callback);
                     return;
                 default:
                     throw new InvalidOperationException(
@@ -2251,25 +2149,48 @@ namespace PDMTools.Services
             }
         }
 
-        private static void TryInvokeCreateTree(object batchObj, string transitionName)
+        /// <summary>
+        /// CreateTree 定義於基底 <c>IEdmBatchChangeState</c>，須在 AddFile 後、ShowDlg 前呼叫，以設定本次批次轉換目標。
+        /// 回傳 true 表示成功呼叫；false 表示 dynamic 與反射均未能執行（可供呼叫端記錄診斷）。
+        /// </summary>
+        private static bool TryInvokeCreateTree(object batchObj, string transitionName)
         {
             if (batchObj == null || string.IsNullOrWhiteSpace(transitionName))
             {
-                return;
+                return false;
             }
 
             try
             {
                 dynamic b = batchObj;
                 b.CreateTree(transitionName);
-                return;
+                return true;
             }
             catch
             {
                 // 改試介面反射
             }
 
-            foreach (var iface in new[] { typeof(IEdmBatchChangeState6), typeof(IEdmBatchChangeState5), typeof(IEdmBatchChangeState4) })
+            // CreateTree 定義於基底 IEdmBatchChangeState；反射需涵蓋至低版次介面，不可只列 v4+。
+            var asm = typeof(IEdmBatchChangeState4).Assembly;
+            var ns = typeof(IEdmBatchChangeState4).Namespace;
+            var ifaceTypes = new List<Type>
+            {
+                typeof(IEdmBatchChangeState6),
+                typeof(IEdmBatchChangeState5),
+                typeof(IEdmBatchChangeState4)
+            };
+
+            foreach (var name in new[] { "IEdmBatchChangeState3", "IEdmBatchChangeState2", "IEdmBatchChangeState" })
+            {
+                var t = asm.GetType(ns + "." + name);
+                if (t != null)
+                {
+                    ifaceTypes.Add(t);
+                }
+            }
+
+            foreach (var iface in ifaceTypes)
             {
                 var m = iface.GetMethod("CreateTree", new[] { typeof(string) });
                 if (m == null)
@@ -2280,13 +2201,15 @@ namespace PDMTools.Services
                 try
                 {
                     m.Invoke(batchObj, new object[] { transitionName });
-                    return;
+                    return true;
                 }
                 catch
                 {
                     // try next
                 }
             }
+
+            return false;
         }
 
         /// <summary>
