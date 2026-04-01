@@ -1248,130 +1248,24 @@ namespace PDMTools.Services
                 return;
             }
 
-            // 晚繫結：常見為 GetDstState(out IEdmState5)。
+            // IEdmTransition5 提供 ToState 屬性（getter = get_ToState），直接取得目標狀態。
+            // 注意：ToState 回傳的 IEdmState5 為 COM 物件，使用後須 Release。
+            IEdmState5 dstState = null;
             try
             {
-                dynamic d = tr;
-                object dstObj = null;
-                try
+                dstState = tr.ToState;
+                if (dstState != null)
                 {
-                    d.GetDstState(out dstObj);
-                }
-                catch
-                {
-                    dstObj = null;
-                }
-
-                if (TryCopyStateNameFromObject(dstObj, out targetStateName))
-                {
-                    return;
+                    targetStateName = (dstState.Name ?? string.Empty).Trim();
                 }
             }
             catch
             {
                 // ignore
             }
-
-            try
+            finally
             {
-                var t = tr.GetType();
-                foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public))
-                {
-                    if (!string.Equals(m.Name, "GetDstState", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    var ps = m.GetParameters();
-                    if (ps.Length != 1 || !ps[0].ParameterType.IsByRef)
-                    {
-                        continue;
-                    }
-
-                    object[] args = { null };
-                    try
-                    {
-                        m.Invoke(tr, args);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (TryCopyStateNameFromObject(args[0], out targetStateName))
-                    {
-                        return;
-                    }
-                }
-
-                foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public))
-                {
-                    if (m.Name.IndexOf("Dst", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        m.Name.IndexOf("ToState", StringComparison.OrdinalIgnoreCase) < 0)
-                    {
-                        continue;
-                    }
-
-                    if (string.Equals(m.Name, "GetDstState", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    var ps = m.GetParameters();
-                    if (ps.Length != 1 || !ps[0].ParameterType.IsByRef)
-                    {
-                        continue;
-                    }
-
-                    object[] args = { null };
-                    try
-                    {
-                        m.Invoke(tr, args);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (TryCopyStateNameFromObject(args[0], out targetStateName))
-                    {
-                        return;
-                    }
-                }
-
-                foreach (var m in t.GetMethods(BindingFlags.Instance | BindingFlags.Public))
-                {
-                    if (m.GetParameters().Length != 0)
-                    {
-                        continue;
-                    }
-
-                    if (m.Name.IndexOf("Dst", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        m.Name.IndexOf("Target", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        m.Name.IndexOf("ToState", StringComparison.OrdinalIgnoreCase) < 0)
-                    {
-                        continue;
-                    }
-
-                    object r;
-                    try
-                    {
-                        r = m.Invoke(tr, null);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-
-                    if (TryCopyStateNameFromObject(r, out targetStateName))
-                    {
-                        return;
-                    }
-                }
-            }
-            catch
-            {
-                // ignore
+                ComHelper.Release(dstState);
             }
         }
 
