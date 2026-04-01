@@ -293,8 +293,7 @@
       <!-- ── 操作按鈕列 ── -->
       <WrapPanel x:Name="BomOperationsPanel"
                  Grid.Row="1"
-                 Orientation="Horizontal"
-                 ItemHeight="34">
+                 Orientation="Horizontal">
 
         <!-- 【抓取】 -->
         <GroupBox Header="抓取" Style="{StaticResource SectionGroupBoxStyle}">
