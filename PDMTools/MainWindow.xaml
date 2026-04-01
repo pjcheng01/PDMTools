@@ -9,7 +9,67 @@
         WindowStartupLocation="CenterScreen">
   <Window.Resources>
 
-    <!-- ── 欄位篩選漏斗按鈕 ── -->
+    <!-- ════════════════════════════════════════════
+         圓角 ControlTemplate — Button
+    ════════════════════════════════════════════ -->
+    <ControlTemplate x:Key="RoundedButtonTemplate" TargetType="Button">
+      <Border x:Name="Bd"
+              Background="{TemplateBinding Background}"
+              BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}"
+              CornerRadius="6"
+              Padding="{TemplateBinding Padding}"
+              SnapsToDevicePixels="True">
+        <ContentPresenter HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          RecognizesAccessKey="True" />
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="#FFEEF0F3" />
+          <Setter TargetName="Bd" Property="BorderBrush" Value="#FFB0BEC5" />
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="#FFD6DAE0" />
+        </Trigger>
+        <Trigger Property="IsEnabled" Value="False">
+          <Setter Property="Opacity" Value="0.5" />
+        </Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <!-- ── 圓角 ControlTemplate — ToggleButton ── -->
+    <ControlTemplate x:Key="RoundedToggleButtonTemplate" TargetType="ToggleButton">
+      <Border x:Name="Bd"
+              Background="{TemplateBinding Background}"
+              BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}"
+              CornerRadius="6"
+              Padding="{TemplateBinding Padding}"
+              SnapsToDevicePixels="True">
+        <ContentPresenter HorizontalAlignment="Center"
+                          VerticalAlignment="Center"
+                          RecognizesAccessKey="True" />
+      </Border>
+      <ControlTemplate.Triggers>
+        <Trigger Property="IsChecked" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="#FFE8EAF6" />
+          <Setter TargetName="Bd" Property="BorderBrush" Value="#FF5C6BC0" />
+        </Trigger>
+        <Trigger Property="IsMouseOver" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="#FFEEF0F3" />
+          <Setter TargetName="Bd" Property="BorderBrush" Value="#FFB0BEC5" />
+        </Trigger>
+        <Trigger Property="IsPressed" Value="True">
+          <Setter TargetName="Bd" Property="Background" Value="#FFD6DAE0" />
+        </Trigger>
+        <Trigger Property="IsEnabled" Value="False">
+          <Setter Property="Opacity" Value="0.5" />
+        </Trigger>
+      </ControlTemplate.Triggers>
+    </ControlTemplate>
+
+    <!-- ── 欄位篩選漏斗按鈕（小型，不套圓角 Template）── -->
     <Style x:Key="FilterHeaderButtonStyle" TargetType="Button">
       <Setter Property="FontSize" Value="10" />
       <Setter Property="Padding" Value="2,0,2,0" />
@@ -60,12 +120,44 @@
       </Setter>
     </Style>
 
-    <!-- ── 功能區 GroupBox 標題樣式 ── -->
+    <!-- ── 功能區 GroupBox（圓角自訂 Template）── -->
     <Style x:Key="SectionGroupBoxStyle" TargetType="GroupBox">
       <Setter Property="Margin" Value="0,0,8,0" />
-      <Setter Property="Padding" Value="8,4,8,6" />
+      <Setter Property="Padding" Value="8,6,8,6" />
       <Setter Property="BorderBrush" Value="#FFCDD1D6" />
       <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Background" Value="White" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="GroupBox">
+            <Border BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    Background="{TemplateBinding Background}"
+                    CornerRadius="8"
+                    SnapsToDevicePixels="True">
+              <Grid>
+                <Grid.RowDefinitions>
+                  <RowDefinition Height="Auto" />
+                  <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+                <!-- 標題列 -->
+                <Border Grid.Row="0"
+                        Background="#FFF3F4F6"
+                        CornerRadius="8,8,0,0"
+                        Padding="8,3,8,4"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="0,0,0,1">
+                  <ContentPresenter ContentSource="Header"
+                                    RecognizesAccessKey="True" />
+                </Border>
+                <!-- 內容 -->
+                <ContentPresenter Grid.Row="1"
+                                  Margin="{TemplateBinding Padding}" />
+              </Grid>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
       <Setter Property="HeaderTemplate">
         <Setter.Value>
           <DataTemplate>
@@ -78,26 +170,71 @@
       </Setter>
     </Style>
 
-    <!-- ── 工具列按鈕共用樣式 ── -->
+    <!-- ── 工具列按鈕（圓角）── -->
     <Style x:Key="ToolBarButtonStyle" TargetType="Button">
       <Setter Property="Height" Value="30" />
       <Setter Property="Padding" Value="10,0" />
       <Setter Property="Margin" Value="0,0,6,0" />
       <Setter Property="MinWidth" Value="80" />
+      <Setter Property="Background" Value="White" />
+      <Setter Property="BorderBrush" Value="#FFD1D5DB" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Template" Value="{StaticResource RoundedButtonTemplate}" />
     </Style>
 
-    <!-- ── 圖示 + 文字按鈕內容範本 ── -->
-    <DataTemplate x:Key="IconTextButtonTemplate">
-      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-        <TextBlock x:Name="Icon"
-                   FontFamily="Segoe MDL2 Assets"
-                   FontSize="13"
-                   Margin="0,0,5,0"
-                   VerticalAlignment="Center" />
-        <TextBlock x:Name="Label"
-                   VerticalAlignment="Center" />
-      </StackPanel>
-    </DataTemplate>
+    <!-- ── 小型按鈕（路徑列、快照、重新載入等）── -->
+    <Style x:Key="SmallButtonStyle" TargetType="Button">
+      <Setter Property="Background" Value="White" />
+      <Setter Property="BorderBrush" Value="#FFD1D5DB" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Template" Value="{StaticResource RoundedButtonTemplate}" />
+    </Style>
+
+    <!-- ── ToggleButton 圓角樣式 ── -->
+    <Style x:Key="RoundedToggleButtonStyle" TargetType="ToggleButton">
+      <Setter Property="Background" Value="White" />
+      <Setter Property="BorderBrush" Value="#FFD1D5DB" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Template" Value="{StaticResource RoundedToggleButtonTemplate}" />
+    </Style>
+
+    <!-- ── 全域 TextBox 圓角（自動套用）── -->
+    <Style TargetType="{x:Type TextBox}">
+      <Setter Property="BorderBrush" Value="#FFD1D5DB" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Padding" Value="6,0" />
+      <Setter Property="SnapsToDevicePixels" Value="True" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="{x:Type TextBox}">
+            <Border x:Name="Bd"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="5"
+                    SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}">
+              <ScrollViewer x:Name="PART_ContentHost"
+                            Padding="{TemplateBinding Padding}"
+                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                            HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                            Focusable="False" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bd" Property="Opacity" Value="0.6" />
+                <Setter TargetName="Bd" Property="Background" Value="#FFF9FAFB" />
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#FF9CA3AF" />
+              </Trigger>
+              <Trigger Property="IsKeyboardFocusWithin" Value="True">
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#FF6366F1" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
 
   </Window.Resources>
 
@@ -141,6 +278,7 @@
               Height="30"
               Padding="12,0"
               Margin="0,0,6,0"
+              Style="{StaticResource SmallButtonStyle}"
               Click="BrowseButton_OnClick">
         <StackPanel Orientation="Horizontal">
           <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xED25;" FontSize="13" Margin="0,0,5,0" VerticalAlignment="Center"/>
@@ -152,6 +290,7 @@
               Grid.Column="3"
               Height="30"
               Padding="10,0"
+              Style="{StaticResource SmallButtonStyle}"
               Click="RecentPathsButton_OnClick"
               ToolTip="顯示最近使用過的組合件路徑">
         <StackPanel Orientation="Horizontal">
@@ -197,6 +336,7 @@
                   Height="26"
                   Padding="10,0"
                   Margin="0,0,6,0"
+                  Style="{StaticResource SmallButtonStyle}"
                   Click="SaveProjectButton_OnClick"
                   ToolTip="將目前畫面上的路徑、模式、表格資料與篩選狀態存成 JSON 快照。">
             <StackPanel Orientation="Horizontal">
@@ -207,6 +347,7 @@
           <Button x:Name="LoadProjectButton"
                   Height="26"
                   Padding="10,0"
+                  Style="{StaticResource SmallButtonStyle}"
                   Click="LoadProjectButton_OnClick"
                   ToolTip="從 JSON 快照還原畫面（不需重新向 Vault／SolidWorks 抓取）。">
             <StackPanel Orientation="Horizontal">
@@ -256,6 +397,7 @@
                     ToolTip="選檔後由 PDM 讀取組態清單；可從清單選取，或直接輸入組態名稱。" />
           <Button x:Name="ReloadConfigurationsButton"
                   Height="26" Padding="8,0" Margin="0,0,14,0"
+                  Style="{StaticResource SmallButtonStyle}"
                   Click="ReloadConfigurationsButton_OnClick"
                   ToolTip="依目前路徑向 PDM 重新讀取組態清單。">
             <StackPanel Orientation="Horizontal">
@@ -309,6 +451,7 @@
             <ToggleButton x:Name="ShowDrawingsToggle"
                           Height="30" Padding="10,0" Margin="0,0,0,0"
                           IsEnabled="False"
+                          Style="{StaticResource RoundedToggleButtonStyle}"
                           Click="ShowDrawingsToggle_Click"
                           ToolTip="切換顯示／隱藏工程圖列（.SLDDRW）">
               <StackPanel Orientation="Horizontal">
@@ -334,6 +477,7 @@
                       ToolTip="選擇快速篩選條件，即時套用於表格。" />
             <Button x:Name="ClearFiltersButton"
                     Height="30" Padding="10,0"
+                    Style="{StaticResource SmallButtonStyle}"
                     Click="ClearFiltersButton_OnClick"
                     IsEnabled="False"
                     ToolTip="清除所有欄位篩選與快速篩選條件">
@@ -454,6 +598,10 @@
 
       <!-- Vault BOM 模式 -->
       <Grid x:Name="BomModeContentPanel" Visibility="Visible">
+        <Border BorderBrush="#FFE5E7EB"
+                BorderThickness="1"
+                CornerRadius="8"
+                ClipToBounds="True">
         <DataGrid x:Name="BomDataGrid"
                   IsReadOnly="True"
                   AutoGenerateColumns="False"
@@ -467,6 +615,7 @@
                   AlternationCount="2"
                   EnableRowVirtualization="True"
                   EnableColumnVirtualization="True"
+                  BorderThickness="0"
                   ColumnHeaderStyle="{StaticResource BomDataGridColumnHeaderStyle}"
                   Sorting="BomDataGrid_OnSorting"
                   PreviewMouseRightButtonDown="BomDataGrid_OnPreviewMouseRightButtonDown"
@@ -494,6 +643,7 @@
             </ContextMenu>
           </DataGrid.ContextMenu>
         </DataGrid>
+        </Border>
       </Grid>
 
       <!-- 參考稽核模式 -->
@@ -509,6 +659,7 @@
         <WrapPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,6">
           <Button x:Name="RunReferenceAuditButton"
                   Height="28" Padding="10,0" Margin="0,0,8,0"
+                  Style="{StaticResource SmallButtonStyle}"
                   Click="RunReferenceAuditButton_OnClick">
             <StackPanel Orientation="Horizontal">
               <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE896;" FontSize="12" Margin="0,0,4,0" VerticalAlignment="Center"/>
@@ -517,6 +668,7 @@
           </Button>
           <Button x:Name="ExportReferenceAuditButton"
                   Height="28" Padding="10,0" Margin="0,0,12,0"
+                  Style="{StaticResource SmallButtonStyle}"
                   Click="ExportReferenceAuditButton_OnClick"
                   IsEnabled="False">
             <StackPanel Orientation="Horizontal">
@@ -571,22 +723,28 @@
                    TextWrapping="Wrap"
                    Text="以 SolidWorks API 遞迴展開單一 .sldasm（可為 Vault 外路徑）。可選「同資料夾搜尋工程圖」以加入同名 .slddrw。「在 Vault 內」以 C:\CP-PDM 為判斷根目錄。匯出稽核 xlsx 僅包含「目前預覽篩選後」的列。請在本機已安裝 SolidWorks 下執行。" />
 
-        <DataGrid x:Name="ReferenceAuditDataGrid"
-                  Grid.Row="3"
-                  MinHeight="160"
-                  IsReadOnly="True"
-                  AutoGenerateColumns="True"
-                  CanUserAddRows="False"
-                  CanUserDeleteRows="False"
-                  SelectionMode="Extended"
-                  HeadersVisibility="Column"
-                  GridLinesVisibility="All"
-                  HorizontalGridLinesBrush="#FFE5E7EB"
-                  VerticalGridLinesBrush="#FFE5E7EB"
-                  AlternationCount="2"
-                  EnableRowVirtualization="True"
-                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
-                  ScrollViewer.VerticalScrollBarVisibility="Auto" />
+        <Border Grid.Row="3"
+                BorderBrush="#FFE5E7EB"
+                BorderThickness="1"
+                CornerRadius="8"
+                ClipToBounds="True">
+          <DataGrid x:Name="ReferenceAuditDataGrid"
+                    MinHeight="160"
+                    IsReadOnly="True"
+                    AutoGenerateColumns="True"
+                    CanUserAddRows="False"
+                    CanUserDeleteRows="False"
+                    SelectionMode="Extended"
+                    HeadersVisibility="Column"
+                    GridLinesVisibility="All"
+                    HorizontalGridLinesBrush="#FFE5E7EB"
+                    VerticalGridLinesBrush="#FFE5E7EB"
+                    AlternationCount="2"
+                    EnableRowVirtualization="True"
+                    BorderThickness="0"
+                    ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                    ScrollViewer.VerticalScrollBarVisibility="Auto" />
+        </Border>
       </Grid>
     </Grid>
 
@@ -596,8 +754,10 @@
     <Border Grid.Row="4"
             Background="#FFF3F4F6"
             BorderBrush="#FFE5E7EB"
-            BorderThickness="0,1,0,0"
-            Padding="12,4">
+            BorderThickness="1"
+            CornerRadius="8"
+            Margin="12,6,12,8"
+            Padding="12,5">
       <Grid>
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="*" />
