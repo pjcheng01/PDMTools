@@ -333,9 +333,31 @@
           Margin="0,0,0,0">
       <Grid x:Name="BomModeContentPanel"
             Visibility="Visible">
+        <Grid.RowDefinitions>
+          <RowDefinition Height="Auto" />
+          <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- 快速篩選列（Vault BOM 模式） -->
+        <StackPanel Grid.Row="0"
+                    Orientation="Horizontal"
+                    Margin="0,0,0,4">
+          <TextBlock Text="快速篩選："
+                     VerticalAlignment="Center"
+                     Foreground="DimGray"
+                     Margin="0,0,6,0" />
+          <ComboBox x:Name="QuickFilterComboBox"
+                    Width="340"
+                    Height="26"
+                    VerticalContentAlignment="Center"
+                    SelectionChanged="QuickFilterComboBox_OnSelectionChanged"
+                    ToolTip="從清單選擇快速篩選條件，即時套用於目前表格。選「(無快速篩選)」可還原顯示全部列。" />
+        </StackPanel>
+
         <DataGrid x:Name="BomDataGrid"
+                  Grid.Row="1"
                   MinHeight="200"
-                  Margin="0,4,0,0"
+                  Margin="0,0,0,0"
                   IsReadOnly="True"
                   AutoGenerateColumns="False"
                   CanUserAddRows="False"

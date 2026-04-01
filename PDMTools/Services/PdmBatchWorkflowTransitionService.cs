@@ -686,8 +686,26 @@ namespace PDMTools.Services
         {
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            // 優先：與 Explorer「變更狀態」一致——對「目前群組內全部檔案」建立批次後呼叫 GetAvailableTransitionList
-            // （多選時為交集；與僅列舉狀態上所有轉換定義的 GetNextTransition 不同）。
+            // ── 主路徑：IEdmState6.GetFirstTransitionPosition(true) ────────────────────────────────
+            // GetFirstTransitionPosition(true)  = exit（離開當前狀態）transitions，與 Explorer「變更狀態」一致。
+            // GetFirstTransitionPosition(false) = entry（進入當前狀態）transitions，不應顯示。
+            // 批次 API GetAvailableTransitionList 在部分 PDM 版本會同時回傳 exit 與 entry transitions，
+            // 導致顯示錯誤的「取消…」類反向轉換；故改以 IEdmState6 列舉作為主路徑。
+            if (group.FilePaths.Count > 0)
+            {
+                TryFillTransitionsFromCurrentState(vault7, group.FilePaths[0], group.AvailableTransitions, seen);
+            }
+
+            if (!TransitionsListLooksUnusable(group.AvailableTransitions))
+            {
+                return;
+            }
+
+            group.AvailableTransitions.Clear();
+            seen.Clear();
+
+            // ── 後備 1：批次 GetAvailableTransitionList ───────────────────────────────────────────
+            // 僅當 IEdmState6 路徑完全無結果時才使用。
             object batchObj = null;
             try
             {
@@ -695,67 +713,68 @@ namespace PDMTools.Services
                 if (batchObj == null)
                 {
                     group.AnalyzeError = "無法建立批次轉狀態工具。";
-                    return;
                 }
-
-                foreach (var path in group.FilePaths)
+                else
                 {
-                    IEdmFolder5 folder = null;
-                    IEdmFile5 file = null;
+                    foreach (var path in group.FilePaths)
+                    {
+                        IEdmFolder5 folder = null;
+                        IEdmFile5 file = null;
+                        try
+                        {
+                            file = vault7.GetFileFromPath(path, out folder);
+                            if (file == null || folder == null)
+                            {
+                                group.AnalyzeError = "部分路徑無法解析為 Vault 檔案：" + path;
+                                return;
+                            }
+
+                            InvokeAddFile(batchObj, file.ID, folder.ID);
+                        }
+                        finally
+                        {
+                            ComHelper.Release(file);
+                            ComHelper.Release(folder);
+                        }
+                    }
+
+                    EdmChangeStateTransitionInfo[] infos = null;
                     try
                     {
-                        file = vault7.GetFileFromPath(path, out folder);
-                        if (file == null || folder == null)
+                        InvokeGetAvailableTransitionList(batchObj, out infos);
+                    }
+                    catch
+                    {
+                        infos = null;
+                    }
+
+                    if (infos != null && infos.Length > 0)
+                    {
+                        foreach (var info in infos)
                         {
-                            group.AnalyzeError = "部分路徑無法解析為 Vault 檔案：" + path;
-                            return;
+                            TryReadTransitionFields(info, out var id, out var name, out var target, out var rawMbs);
+                            var key = id + "\u001f" + (name ?? string.Empty);
+                            if (!seen.Add(key))
+                            {
+                                continue;
+                            }
+
+                            group.AvailableTransitions.Add(new PdmTransitionOption
+                            {
+                                TransitionId = id,
+                                TransitionName = name ?? string.Empty,
+                                MbsTransitionNameRaw = rawMbs ?? string.Empty,
+                                TargetStateName = target ?? string.Empty
+                            });
                         }
 
-                        InvokeAddFile(batchObj, file.ID, folder.ID);
-                    }
-                    finally
-                    {
-                        ComHelper.Release(file);
-                        ComHelper.Release(folder);
-                    }
-                }
-
-                EdmChangeStateTransitionInfo[] infos = null;
-                try
-                {
-                    InvokeGetAvailableTransitionList(batchObj, out infos);
-                }
-                catch
-                {
-                    infos = null;
-                }
-
-                if (infos != null && infos.Length > 0)
-                {
-                    foreach (var info in infos)
-                    {
-                        TryReadTransitionFields(info, out var id, out var name, out var target, out var rawMbs);
-                        var key = id + "\u001f" + (name ?? string.Empty);
-                        if (!seen.Add(key))
+                        if (group.FilePaths.Count > 0)
                         {
-                            continue;
+                            TryEnrichZeroTransitionIdsFromStateEnumeration(
+                                vault7,
+                                group.FilePaths[0],
+                                group.AvailableTransitions);
                         }
-
-                        group.AvailableTransitions.Add(new PdmTransitionOption
-                        {
-                            TransitionId = id,
-                            TransitionName = name ?? string.Empty,
-                            MbsTransitionNameRaw = rawMbs ?? string.Empty,
-                            TargetStateName = target ?? string.Empty
-                        });
-                    }
-
-                    if (group.FilePaths.Count > 0)
-                    {
-                        TryEnrichZeroTransitionIdsFromStateEnumeration(
-                            vault7,
-                            group.FilePaths[0],
-                            group.AvailableTransitions);
                     }
                 }
             }
@@ -772,20 +791,7 @@ namespace PDMTools.Services
             group.AvailableTransitions.Clear();
             seen.Clear();
 
-            // 後備：IEdmState6 列舉（僅保留 CheckPermission 為 true，略過未授權／條件不符者）
-            if (group.FilePaths.Count > 0)
-            {
-                TryFillTransitionsFromCurrentState(vault7, group.FilePaths[0], group.AvailableTransitions, seen);
-            }
-
-            if (!TransitionsListLooksUnusable(group.AvailableTransitions))
-            {
-                return;
-            }
-
-            group.AvailableTransitions.Clear();
-            seen.Clear();
-
+            // ── 後備 2：列舉器（GetEnumeratorTransition）────────────────────────────────────────
             if (group.FilePaths.Count > 0)
             {
                 TryFillTransitionsViaEnumeratorTransition(vault7, group.FilePaths[0], group.AvailableTransitions, seen);
@@ -793,7 +799,7 @@ namespace PDMTools.Services
 
             if (group.AvailableTransitions.Count == 0 && string.IsNullOrWhiteSpace(group.AnalyzeError))
             {
-                group.AnalyzeError = "此群組找不到任何可用轉換（批次 GetAvailableTransitionList、IEdmState6、列舉器皆無結果）；請確認權限與工作流程設定。";
+                group.AnalyzeError = "此群組找不到任何可用轉換（IEdmState6、批次 GetAvailableTransitionList、列舉器皆無結果）；請確認權限與工作流程設定。";
             }
         }
 
@@ -1113,9 +1119,12 @@ namespace PDMTools.Services
                     return;
                 }
 
+                // GetFirstTransitionPosition(true)  = exit transitions（離開此狀態，即使用者想執行的轉換）。
+                // GetFirstTransitionPosition(false) = entry transitions（進入此狀態的反向轉換，不應列出）。
+                // 先試 true（exit），若例外再試 false 作為後備（理論上不應走到）。
                 try
                 {
-                    pos = state6.GetFirstTransitionPosition(false);
+                    pos = state6.GetFirstTransitionPosition(true);
                 }
                 catch
                 {
@@ -1126,7 +1135,7 @@ namespace PDMTools.Services
                 {
                     try
                     {
-                        pos = state6.GetFirstTransitionPosition(true);
+                        pos = state6.GetFirstTransitionPosition(false);
                     }
                     catch
                     {

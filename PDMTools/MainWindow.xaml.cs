@@ -79,6 +79,18 @@ namespace PDMTools
             ReferenceAudit = 1
         }
 
+        /// <summary>
+        /// Vault BOM 快速篩選選項。新增篩選條件時只需：
+        /// 1. 在此列舉加入新值；2. 在 <see cref="InitializeQuickFilterComboBox"/> 加入描述；
+        /// 3. 在 <see cref="FilterBomItem"/> 加入對應判斷式。
+        /// </summary>
+        private enum BomQuickFilterOption
+        {
+            None = 0,
+            /// <summary>主檔名相同且同時存在 .SLDPRT（或 .SLDASM）與 .SLDDRW 的列。</summary>
+            HasMatchingDrawing = 1,
+        }
+
         // ── 固定欄位定義（Level 不在此列，永遠顯示）──────────────────────
         private static readonly IReadOnlyList<string> AllFixedColumnNames = new List<string>
         {
@@ -90,6 +102,15 @@ namespace PDMTools
 
         // 目前作用中的固定欄位（null = 全顯示）
         private List<string> _activeFixedColumns = null;
+
+        // ── 快速篩選 ────────────────────────────────────────────────────────
+        private BomQuickFilterOption _activeQuickFilter = BomQuickFilterOption.None;
+        /// <summary>
+        /// 快速篩選「具對應工程圖」用的主檔名查詢集合（不含副檔名，忽略大小寫）。
+        /// 僅含同時存在模型（.SLDPRT / .SLDASM）與工程圖（.SLDDRW）的主檔名。
+        /// 在 _bomItems 變動時由 <see cref="RebuildQuickFilterMatchSet"/> 重建。
+        /// </summary>
+        private HashSet<string> _quickFilterDrawingMatchSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         // 目前作用中的資料卡欄位清單（由設定視窗管理）
         private List<string> _activeCardVarNames = new List<string>();
@@ -116,6 +137,7 @@ namespace PDMTools
             _bomItemsView.Filter = FilterBomItem;
             _bomItems.CollectionChanged += BomItems_CollectionChanged;
             BomDataGrid.ItemsSource = _bomItemsView;
+            InitializeQuickFilterComboBox();
             _auditRowsView = CollectionViewSource.GetDefaultView(_auditRows);
             _auditRowsView.Filter = FilterReferenceAuditRow;
             ReferenceAuditDataGrid.ItemsSource = _auditRowsView;
@@ -2336,6 +2358,7 @@ namespace PDMTools
         private void BomItems_CollectionChanged(object sender, NotifyCollectionChangedEventArgs e)
         {
             RebuildAllFilterValueOptions();
+            RebuildQuickFilterMatchSet();
             _bomItemsView?.Refresh();
             UpdateFilterUiState();
         }
@@ -2345,6 +2368,7 @@ namespace PDMTools
             if (!(obj is BomItem item))
                 return false;
 
+            // ── 欄位篩選 ────────────────────────────────────────────────────
             foreach (var state in _columnFilters.Values)
             {
                 if (state.AvailableValues.Count == 0)
@@ -2356,6 +2380,15 @@ namespace PDMTools
 
                 var currentValue = NormalizeFilterValue(state.ValueGetter(item));
                 if (!state.SelectedValues.Contains(currentValue))
+                    return false;
+            }
+
+            // ── 快速篩選 ────────────────────────────────────────────────────
+            if (_activeQuickFilter == BomQuickFilterOption.HasMatchingDrawing)
+            {
+                // 取主檔名（不含副檔名），查詢是否同時有模型與工程圖
+                var baseName = System.IO.Path.GetFileNameWithoutExtension(item.FileName ?? string.Empty);
+                if (!_quickFilterDrawingMatchSet.Contains(baseName))
                     return false;
             }
 
@@ -2671,6 +2704,77 @@ namespace PDMTools
             StatusTextBlock.Text = _bomItems.Count > 0
                 ? $"已套用篩選，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆。"
                 : "已套用篩選。";
+        }
+
+        // ── 快速篩選：初始化、重建查詢集合、事件處理 ────────────────────────
+
+        /// <summary>
+        /// 初始化 <see cref="QuickFilterComboBox"/> 選項。
+        /// 新增快速篩選時，在此新增對應 Tag（<see cref="BomQuickFilterOption"/>）的 ComboBoxItem 即可。
+        /// </summary>
+        private void InitializeQuickFilterComboBox()
+        {
+            QuickFilterComboBox.Items.Clear();
+            QuickFilterComboBox.Items.Add(new ComboBoxItem
+            {
+                Tag = BomQuickFilterOption.None,
+                Content = "（無快速篩選）"
+            });
+            QuickFilterComboBox.Items.Add(new ComboBoxItem
+            {
+                Tag = BomQuickFilterOption.HasMatchingDrawing,
+                Content = "具對應工程圖（.SLDPRT + .SLDDRW 或 .SLDASM + .SLDDRW，主檔名相同）"
+            });
+            QuickFilterComboBox.SelectedIndex = 0;
+        }
+
+        /// <summary>
+        /// 根據 <see cref="_bomItems"/> 目前內容，重建「具對應工程圖」快速篩選用的主檔名集合。
+        /// 集合內僅包含同時存在模型（.SLDPRT 或 .SLDASM）與工程圖（.SLDDRW）的主檔名（不含副檔名）。
+        /// </summary>
+        private void RebuildQuickFilterMatchSet()
+        {
+            var modelBaseNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var drawingBaseNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var item in _bomItems)
+            {
+                var fn = item.FileName ?? string.Empty;
+                var ext = System.IO.Path.GetExtension(fn);
+                var baseName = System.IO.Path.GetFileNameWithoutExtension(fn);
+                if (string.IsNullOrWhiteSpace(baseName))
+                    continue;
+
+                if (ext.Equals(".SLDPRT", StringComparison.OrdinalIgnoreCase)
+                    || ext.Equals(".SLDASM", StringComparison.OrdinalIgnoreCase))
+                {
+                    modelBaseNames.Add(baseName);
+                }
+                else if (ext.Equals(".SLDDRW", StringComparison.OrdinalIgnoreCase))
+                {
+                    drawingBaseNames.Add(baseName);
+                }
+            }
+
+            // 取交集：同時有模型與工程圖的主檔名
+            modelBaseNames.IntersectWith(drawingBaseNames);
+            _quickFilterDrawingMatchSet = modelBaseNames;
+        }
+
+        private void QuickFilterComboBox_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (QuickFilterComboBox.SelectedItem is ComboBoxItem selected
+                && selected.Tag is BomQuickFilterOption option)
+            {
+                _activeQuickFilter = option;
+                _bomItemsView?.Refresh();
+                UpdateFilterUiState();
+                if (_bomItems.Count > 0)
+                {
+                    var label = option == BomQuickFilterOption.None ? "清除" : "套用";
+                    StatusTextBlock.Text = $"已{label}快速篩選，顯示 {GetFilteredCount()} / {_bomItems.Count} 筆。";
+                }
+            }
         }
 
         private void ClearAllFiltersSilently()
