@@ -105,61 +105,57 @@ namespace PDMTools.Services
             var result = new List<(string, string)>();
             var diag   = new StringBuilder();
 
-            // ── 方法一：透過 IEdmVault5 介面直接呼叫（最可靠）──────────────────
+            // ── 方法一：搜尋 RCW 實作的所有介面，找 GetVaultViews ──────────────
+            // 注意：GetVaultViews 不在 IEdmVault5，在更高版本介面（IEdmVault8+），
+            // 所以不能直接轉型 IEdmVault5 呼叫，必須透過介面反射搜尋。
             try
             {
                 var tempVault = new EdmVault5();
                 try
                 {
-                    if (tempVault is IEdmVault5 v5)
-                    {
-                        EdmViewInfo[] views = null;
-                        v5.GetVaultViews(out views, false);
-                        diag.AppendLine($"[方法一] IEdmVault5.GetVaultViews 呼叫成功，回傳 {views?.Length ?? 0} 個視圖");
-                        if (views != null)
-                            foreach (var v in views)
-                                result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
-                    }
-                    else
-                    {
-                        diag.AppendLine("[方法一] tempVault 無法轉型為 IEdmVault5，改用反射");
+                    var allIfaces = tempVault.GetType().GetInterfaces();
+                    diag.AppendLine($"[方法一] RCW 實作 {allIfaces.Length} 個介面");
 
-                        // ── 方法二：搜尋所有已實作介面的 GetVaultViews ──────────
-                        foreach (var iface in tempVault.GetType().GetInterfaces())
+                    foreach (var iface in allIfaces)
+                    {
+                        var mi = iface.GetMethod("GetVaultViews",
+                            BindingFlags.Instance | BindingFlags.Public);
+                        if (mi == null) continue;
+
+                        diag.AppendLine($"  找到 {iface.Name}.GetVaultViews，嘗試呼叫...");
+                        try
                         {
-                            var mi = iface.GetMethod("GetVaultViews",
-                                BindingFlags.Instance | BindingFlags.Public);
-                            if (mi == null) continue;
-
-                            diag.AppendLine($"[方法二] 找到 {iface.Name}.GetVaultViews");
-                            try
+                            var args = new object[] { null, false };
+                            mi.Invoke(tempVault, args);
+                            if (args[0] is EdmViewInfo[] views)
                             {
-                                var args = new object[] { null, false };
-                                mi.Invoke(tempVault, args);
-                                if (args[0] is EdmViewInfo[] views)
-                                {
-                                    diag.AppendLine($"  成功，{views.Length} 個視圖");
-                                    foreach (var v in views)
-                                        result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
-                                }
-                                else
-                                {
-                                    diag.AppendLine($"  args[0] 型別：{args[0]?.GetType()?.FullName ?? "null"}");
-                                }
+                                diag.AppendLine($"  成功，{views.Length} 個視圖");
+                                foreach (var v in views)
+                                    result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
                             }
-                            catch (Exception ex2)
+                            else
                             {
-                                diag.AppendLine($"  呼叫失敗：{ex2.Message}");
+                                diag.AppendLine($"  args[0] 型別：{args[0]?.GetType()?.FullName ?? "null"}");
                             }
-                            break;
                         }
+                        catch (Exception ex2)
+                        {
+                            diag.AppendLine($"  呼叫失敗：{ex2.Message}");
+                        }
+                        break;  // 只嘗試第一個找到的介面方法
+                    }
+
+                    if (result.Count == 0 && !allIfaces.Any(i =>
+                        i.GetMethod("GetVaultViews", BindingFlags.Instance | BindingFlags.Public) != null))
+                    {
+                        diag.AppendLine("  所有介面均未找到 GetVaultViews");
                     }
                 }
                 finally { Marshal.ReleaseComObject(tempVault); }
             }
             catch (Exception ex)
             {
-                diag.AppendLine($"[方法一/二] 例外：{ex.GetType().Name}: {ex.Message}");
+                diag.AppendLine($"[方法一] 例外：{ex.GetType().Name}: {ex.Message}");
             }
 
             // ── 方法三：直接讀 Registry（備援）──────────────────────────────────
