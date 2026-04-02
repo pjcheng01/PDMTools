@@ -105,63 +105,38 @@ namespace PDMTools.Services
             var result = new List<(string, string)>();
             var diag   = new StringBuilder();
 
-            // ── 方法一：搜尋 RCW 實作的所有介面，找 GetVaultViews ──────────────
-            // 注意：GetVaultViews 不在 IEdmVault5，在更高版本介面（IEdmVault8+），
-            // 所以不能直接轉型 IEdmVault5 呼叫，必須透過介面反射搜尋。
+            // ── GetVaultViews 定義在 IEdmVault8（非 IEdmVault5）。
+            //    new EdmVault5() 的執行期 COM 物件實作所有版本介面，直接轉型即可。
+            //    第二個參數 bOnlyLoggedIn=false → 回傳所有本機已設定視圖，不論是否已登入。
             try
             {
                 var tempVault = new EdmVault5();
                 try
                 {
-                    var allIfaces = tempVault.GetType().GetInterfaces();
-                    diag.AppendLine($"[方法一] RCW 實作 {allIfaces.Length} 個介面");
-
-                    foreach (var iface in allIfaces)
+                    if (tempVault is IEdmVault8 v8)
                     {
-                        var mi = iface.GetMethod("GetVaultViews",
-                            BindingFlags.Instance | BindingFlags.Public);
-                        if (mi == null) continue;
-
-                        diag.AppendLine($"  找到 {iface.Name}.GetVaultViews，嘗試呼叫...");
-                        try
-                        {
-                            var args = new object[] { null, false };
-                            mi.Invoke(tempVault, args);
-                            if (args[0] is EdmViewInfo[] views)
-                            {
-                                diag.AppendLine($"  成功，{views.Length} 個視圖");
-                                foreach (var v in views)
-                                    result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
-                            }
-                            else
-                            {
-                                diag.AppendLine($"  args[0] 型別：{args[0]?.GetType()?.FullName ?? "null"}");
-                            }
-                        }
-                        catch (Exception ex2)
-                        {
-                            diag.AppendLine($"  呼叫失敗：{ex2.Message}");
-                        }
-                        break;  // 只嘗試第一個找到的介面方法
+                        v8.GetVaultViews(out EdmViewInfo[] views, false);
+                        diag.AppendLine($"[IEdmVault8.GetVaultViews] 成功，回傳 {views?.Length ?? 0} 個視圖");
+                        if (views != null)
+                            foreach (var v in views)
+                                result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
                     }
-
-                    if (result.Count == 0 && !allIfaces.Any(i =>
-                        i.GetMethod("GetVaultViews", BindingFlags.Instance | BindingFlags.Public) != null))
+                    else
                     {
-                        diag.AppendLine("  所有介面均未找到 GetVaultViews");
+                        diag.AppendLine("[IEdmVault8] 轉型失敗（PDM 版本過舊？），改用 Registry 備援");
                     }
                 }
                 finally { Marshal.ReleaseComObject(tempVault); }
             }
             catch (Exception ex)
             {
-                diag.AppendLine($"[方法一] 例外：{ex.GetType().Name}: {ex.Message}");
+                diag.AppendLine($"[IEdmVault8.GetVaultViews] 例外：{ex.GetType().Name}: {ex.Message}");
             }
 
-            // ── 方法三：直接讀 Registry（備援）──────────────────────────────────
+            // ── Registry 備援（PDM 版本不支援 IEdmVault8 時）────────────────────
             if (result.Count == 0)
             {
-                diag.AppendLine("[方法三] COM 未取得結果，改從 Registry 讀取...");
+                diag.AppendLine("[Registry 備援] COM 未取得結果，改從 Registry 讀取...");
                 TryGetVaultViewsFromRegistry(result, diag);
             }
 
