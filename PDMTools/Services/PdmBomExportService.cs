@@ -219,7 +219,7 @@ namespace PDMTools.Services
                                                  ?? string.Empty;
                                     diag.AppendLine($"    {sub}: VaultName={vaultName}, Path={localPath}");
                                     if (!string.IsNullOrWhiteSpace(vaultName)
-                                        && !result.Any(r => string.Equals(r.VaultName, vaultName,
+                                        && !result.Any(r => string.Equals(r.Item1, vaultName,
                                             StringComparison.OrdinalIgnoreCase)))
                                         result.Add((vaultName, localPath));
                                 }
