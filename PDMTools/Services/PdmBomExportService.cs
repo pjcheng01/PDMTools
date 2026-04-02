@@ -53,11 +53,66 @@ namespace PDMTools.Services
 
         public static IReadOnlyList<string> GetOrderedCardVariableLabels() => OrderedCardVariableLabelList;
 
+        /// <summary>LoginAuto 逾時秒數（預設 30 秒）。Server 無回應時超過此時間將拋出 TimeoutException。</summary>
+        public int LoginTimeoutSeconds { get; set; } = 30;
+
         private readonly IEdmVault5 _vault;
 
         public PdmBomExportService()
         {
             _vault = new EdmVault5();
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        // PDM 環境偵測（靜態，不需 Vault 登入）
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// 偵測本機是否已安裝 SolidWorks PDM 用戶端（嘗試建立 COM 物件）。
+        /// </summary>
+        public static bool IsPdmClientInstalled()
+        {
+            try
+            {
+                var t = new EdmVault5();
+                Marshal.ReleaseComObject(t);
+                return true;
+            }
+            catch (COMException) { return false; }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// 列舉本機已安裝的所有 Vault 本機視圖（讀取 PDM 用戶端 Registry，不需登入）。
+        /// 回傳值為 (VaultName, LocalRootPath) 清單；若偵測失敗則回傳空清單。
+        /// </summary>
+        public static IReadOnlyList<(string VaultName, string LocalPath)> GetLocalVaultViews()
+        {
+            var result = new List<(string, string)>();
+            try
+            {
+                var tempVault = new EdmVault5();
+                try
+                {
+                    // GetVaultViews 使用 out 參數，透過 Reflection 呼叫以相容各版本 Interop
+                    var args = new object[] { null, false };
+                    var mi = tempVault.GetType()
+                                      .GetMethods(BindingFlags.Instance | BindingFlags.Public)
+                                      .FirstOrDefault(m => m.Name == "GetVaultViews");
+                    if (mi != null)
+                    {
+                        mi.Invoke(tempVault, args);
+                        if (args[0] is EdmViewInfo[] views)
+                        {
+                            foreach (var v in views)
+                                result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
+                        }
+                    }
+                }
+                finally { Marshal.ReleaseComObject(tempVault); }
+            }
+            catch { /* PDM 未安裝或版本不支援時靜默回傳空清單 */ }
+            return result;
         }
 
         // ════════════════════════════════════════════════════════════════════
@@ -2620,49 +2675,69 @@ namespace PDMTools.Services
         private void EnsureVaultLogin()
         {
             if (_vault.IsLoggedIn)
-            {
                 return;
-            }
 
+            // ── 建立候選 Vault 名稱清單 ──────────────────────────────────────
             var candidates = new List<string>();
             var resolved = ResolveVaultNameFromPathSafe(VaultRootPath);
             if (!string.IsNullOrWhiteSpace(resolved))
-            {
                 candidates.Add(resolved);
-            }
 
             var folderName = Path.GetFileName(VaultRootPath.TrimEnd('\\', '/'));
-            if (!string.IsNullOrWhiteSpace(folderName) && !candidates.Contains(folderName, StringComparer.OrdinalIgnoreCase))
-            {
+            if (!string.IsNullOrWhiteSpace(folderName)
+                && !candidates.Contains(folderName, StringComparer.OrdinalIgnoreCase))
                 candidates.Add(folderName);
-            }
 
             if (candidates.Count == 0)
-            {
-                throw new InvalidOperationException($"找不到可用的 Vault 名稱，請確認本機視圖路徑是否有效：{VaultRootPath}");
-            }
+                throw new InvalidOperationException(
+                    $"找不到可用的 Vault 名稱，請確認本機視圖路徑是否有效：{VaultRootPath}");
 
+            // ── 逐一嘗試登入（含 Timeout 保護）────────────────────────────────
             Exception lastError = null;
             foreach (var candidate in candidates)
             {
                 try
                 {
-                    _vault.LoginAuto(candidate, 0);
-                    if (_vault.IsLoggedIn)
+                    // LoginAuto 在 Server 無回應時會 hang；以 Task.Run + Wait 加 Timeout 保護
+                    var vaultRef = _vault;
+                    var loginTask = Task.Run(() => vaultRef.LoginAuto(candidate, 0));
+                    bool finished = loginTask.Wait(TimeSpan.FromSeconds(LoginTimeoutSeconds));
+
+                    if (!finished)
                     {
-                        return;
+                        throw new TimeoutException(
+                            $"連線到 Vault「{candidate}」逾時（{LoginTimeoutSeconds} 秒）。\n"
+                            + "PDM Server 目前可能無法從此網路環境連線，請確認網路後重試。");
                     }
+
+                    // 完成但 LoginAuto 內部拋出例外（例如 COM 錯誤）
+                    if (loginTask.IsFaulted)
+                        throw loginTask.Exception?.InnerException ?? loginTask.Exception
+                              ?? new Exception("LoginAuto 發生未知錯誤");
+
+                    if (_vault.IsLoggedIn)
+                        return;   // ✅ 成功
                 }
-                catch (Exception ex)
-                {
-                    lastError = ex;
-                }
+                catch (TimeoutException) { throw; }   // 直接往上傳，不被下一個 candidate 吞掉
+                catch (Exception ex)     { lastError = ex; }
             }
 
-            var joined = string.Join(", ", candidates);
+            // ── 所有候選均失敗 ────────────────────────────────────────────────
+            var joined = string.Join("、", candidates);
+
+            if (lastError != null)
+                throw new InvalidOperationException(
+                    $"PDM 登入失敗（已嘗試 Vault：{joined}）。\n"
+                    + $"錯誤詳情：{lastError.Message}",
+                    lastError);
+
+            // IsLoggedIn == false，但沒有例外 → 使用者取消或帳號無權限
             throw new InvalidOperationException(
-                $"PDM 登入失敗。已嘗試 Vault 名稱：{joined}。請確認 Vault 實際名稱與本機視圖對應是否一致。",
-                lastError);
+                "PDM 登入未完成。可能原因：\n"
+                + "• 使用者關閉了 PDM 登入視窗\n"
+                + "• 帳號或密碼錯誤\n"
+                + "• 此帳號在 Vault 中尚未建立使用者\n"
+                + $"（已嘗試 Vault：{joined}）");
         }
 
         private string ResolveVaultNameFromPathSafe(string localPath)

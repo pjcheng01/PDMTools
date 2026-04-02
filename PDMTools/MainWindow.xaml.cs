@@ -184,7 +184,16 @@ namespace PDMTools
         }
         private async void MainWindow_OnLoaded(object sender, RoutedEventArgs e)
         {
-            // 先讓視窗完成第一輪繪製，避免啟動畫面卡頓
+            // ── PDM 用戶端環境偵測 ───────────────────────────────────────────
+            if (!PdmBomExportService.IsPdmClientInstalled())
+            {
+                StatusTextBlock.Text = "⚠ 未偵測到 SolidWorks PDM 用戶端，Vault BOM 功能將無法使用。請確認 PDM 用戶端是否已正確安裝。";
+                StatusTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(0xC6, 0x28, 0x28));
+                if (StartGrabButton != null) StartGrabButton.IsEnabled = false;
+                return;   // PDM 未安裝，跳過變數偵測
+            }
+
+            // ── 先讓視窗完成第一輪繪製，再做背景作業 ────────────────────────
             await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
             await Task.Delay(800);
             await CheckForNewVaultVariablesAsync();
@@ -1783,12 +1792,23 @@ namespace PDMTools
                     MessageBoxButton.OK,
                     MessageBoxImage.Information);
             }
-            catch (Exception ex)
+            catch (TimeoutException tex)
             {
+                StatusTextBlock.Text = "PDM Server 連線逾時。";
                 MessageBox.Show(
                     progressWin != null ? (Window)progressWin : this,
-                    ex.Message,
-                    "錯誤",
+                    tex.Message,
+                    "PDM Server 連線逾時",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+            catch (Exception ex)
+            {
+                var msg = ex.InnerException?.Message ?? ex.Message;
+                MessageBox.Show(
+                    progressWin != null ? (Window)progressWin : this,
+                    msg,
+                    "PDM 登入或抓取失敗",
                     MessageBoxButton.OK,
                     MessageBoxImage.Error);
             }
