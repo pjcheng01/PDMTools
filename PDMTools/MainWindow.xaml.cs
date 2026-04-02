@@ -241,7 +241,7 @@ namespace PDMTools
         /// </param>
         private void PopulateVaultComboBox(bool restoreLastSelection = false)
         {
-            var views = PdmBomExportService.GetLocalVaultViews();
+            var views = PdmBomExportService.GetLocalVaultViews(out string diag);
 
             _suppressVaultSelectionChanged = true;
             VaultComboBox.Items.Clear();
@@ -252,6 +252,12 @@ namespace PDMTools
                 VaultComboBox.Items.Add(placeholder);
                 VaultComboBox.SelectedIndex = 0;
                 _suppressVaultSelectionChanged = false;
+
+                // 顯示診斷資訊供除錯
+                StatusTextBlock.Text = "⚠ 找不到本機 Vault，請確認 PDM 已設定本機視圖，或點擊「重新整理」重試。";
+                StatusTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(0xB4, 0x5A, 0x09));
+                if (!string.IsNullOrWhiteSpace(diag))
+                    VaultComboBox.ToolTip = "診斷資訊：\n" + diag;
                 return;
             }
 

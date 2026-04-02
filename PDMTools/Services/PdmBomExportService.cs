@@ -94,32 +94,136 @@ namespace PDMTools.Services
         /// 回傳值為 (VaultName, LocalRootPath) 清單；若偵測失敗則回傳空清單。
         /// </summary>
         public static IReadOnlyList<(string VaultName, string LocalPath)> GetLocalVaultViews()
+            => GetLocalVaultViews(out _);
+
+        /// <summary>
+        /// 列舉本機 Vault 本機視圖，並在 <paramref name="diagnosticMessage"/> 輸出除錯記錄。
+        /// </summary>
+        public static IReadOnlyList<(string VaultName, string LocalPath)> GetLocalVaultViews(
+            out string diagnosticMessage)
         {
             var result = new List<(string, string)>();
+            var diag   = new StringBuilder();
+
+            // ── 方法一：透過 IEdmVault5 介面直接呼叫（最可靠）──────────────────
             try
             {
                 var tempVault = new EdmVault5();
                 try
                 {
-                    // GetVaultViews 使用 out 參數，透過 Reflection 呼叫以相容各版本 Interop
-                    var args = new object[] { null, false };
-                    var mi = tempVault.GetType()
-                                      .GetMethods(BindingFlags.Instance | BindingFlags.Public)
-                                      .FirstOrDefault(m => m.Name == "GetVaultViews");
-                    if (mi != null)
+                    if (tempVault is IEdmVault5 v5)
                     {
-                        mi.Invoke(tempVault, args);
-                        if (args[0] is EdmViewInfo[] views)
-                        {
+                        EdmViewInfo[] views = null;
+                        v5.GetVaultViews(out views, false);
+                        diag.AppendLine($"[方法一] IEdmVault5.GetVaultViews 呼叫成功，回傳 {views?.Length ?? 0} 個視圖");
+                        if (views != null)
                             foreach (var v in views)
                                 result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
+                    }
+                    else
+                    {
+                        diag.AppendLine("[方法一] tempVault 無法轉型為 IEdmVault5，改用反射");
+
+                        // ── 方法二：搜尋所有已實作介面的 GetVaultViews ──────────
+                        foreach (var iface in tempVault.GetType().GetInterfaces())
+                        {
+                            var mi = iface.GetMethod("GetVaultViews",
+                                BindingFlags.Instance | BindingFlags.Public);
+                            if (mi == null) continue;
+
+                            diag.AppendLine($"[方法二] 找到 {iface.Name}.GetVaultViews");
+                            try
+                            {
+                                var args = new object[] { null, false };
+                                mi.Invoke(tempVault, args);
+                                if (args[0] is EdmViewInfo[] views)
+                                {
+                                    diag.AppendLine($"  成功，{views.Length} 個視圖");
+                                    foreach (var v in views)
+                                        result.Add((v.mbsVaultName ?? string.Empty, v.mbsPath ?? string.Empty));
+                                }
+                                else
+                                {
+                                    diag.AppendLine($"  args[0] 型別：{args[0]?.GetType()?.FullName ?? "null"}");
+                                }
+                            }
+                            catch (Exception ex2)
+                            {
+                                diag.AppendLine($"  呼叫失敗：{ex2.Message}");
+                            }
+                            break;
                         }
                     }
                 }
                 finally { Marshal.ReleaseComObject(tempVault); }
             }
-            catch { /* PDM 未安裝或版本不支援時靜默回傳空清單 */ }
+            catch (Exception ex)
+            {
+                diag.AppendLine($"[方法一/二] 例外：{ex.GetType().Name}: {ex.Message}");
+            }
+
+            // ── 方法三：直接讀 Registry（備援）──────────────────────────────────
+            if (result.Count == 0)
+            {
+                diag.AppendLine("[方法三] COM 未取得結果，改從 Registry 讀取...");
+                TryGetVaultViewsFromRegistry(result, diag);
+            }
+
+            diagnosticMessage = diag.ToString();
             return result;
+        }
+
+        /// <summary>從 Windows Registry 讀取 PDM 本機視圖（備援方案）。</summary>
+        private static void TryGetVaultViewsFromRegistry(
+            List<(string, string)> result, StringBuilder diag)
+        {
+            // PDM 在不同版本與安裝語系下可能使用不同的 Registry 路徑
+            var candidates = new[]
+            {
+                @"SOFTWARE\SolidWorks\Applications\PDMWorks Enterprise\Databases",
+                @"SOFTWARE\WOW6432Node\SolidWorks\Applications\PDMWorks Enterprise\Databases",
+                @"SOFTWARE\SolidWorks\SOLIDWORKS PDM\Databases",
+                @"SOFTWARE\WOW6432Node\SolidWorks\SOLIDWORKS PDM\Databases",
+                @"SOFTWARE\SolidWorks\Applications\PDMWorks Enterprise\Settings\Databases",
+                @"SOFTWARE\WOW6432Node\SolidWorks\Applications\PDMWorks Enterprise\Settings\Databases",
+            };
+
+            foreach (var regPath in candidates)
+            {
+                try
+                {
+                    using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(regPath))
+                    {
+                        if (key == null) { diag.AppendLine($"  HKLM\\{regPath} 不存在"); continue; }
+
+                        var subNames = key.GetSubKeyNames();
+                        diag.AppendLine($"  HKLM\\{regPath} 找到 {subNames.Length} 個子機碼");
+
+                        foreach (var sub in subNames)
+                        {
+                            using (var subKey = key.OpenSubKey(sub))
+                            {
+                                if (subKey == null) continue;
+                                var vaultName = subKey.GetValue("VaultName") as string
+                                             ?? subKey.GetValue("Name")      as string
+                                             ?? sub;
+                                var localPath = subKey.GetValue("LocalPath")  as string
+                                             ?? subKey.GetValue("RootPath")   as string
+                                             ?? subKey.GetValue("ViewPath")   as string
+                                             ?? string.Empty;
+                                diag.AppendLine($"    {sub}: VaultName={vaultName}, Path={localPath}");
+                                if (!string.IsNullOrWhiteSpace(vaultName))
+                                    result.Add((vaultName, localPath));
+                            }
+                        }
+                        if (result.Count > 0) return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    diag.AppendLine($"  {regPath} 讀取例外：{ex.Message}");
+                }
+            }
         }
 
         // ════════════════════════════════════════════════════════════════════
