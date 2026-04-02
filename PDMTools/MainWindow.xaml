@@ -269,6 +269,7 @@
                 DockPanel.Dock="Right"
                 Height="26"
                 Padding="8,0"
+                Margin="6,0,0,0"
                 Style="{StaticResource SmallButtonStyle}"
                 Click="RefreshVaultListButton_OnClick"
                 ToolTip="重新掃描本機已安裝的 Vault 清單">
@@ -278,13 +279,26 @@
           </StackPanel>
         </Button>
 
+        <Button x:Name="BrowseVaultButton"
+                DockPanel.Dock="Right"
+                Height="26"
+                Padding="8,0"
+                Style="{StaticResource SmallButtonStyle}"
+                Click="BrowseVaultButton_OnClick"
+                ToolTip="手動選取 Vault 根目錄資料夾（當自動偵測找不到 Vault 時使用）">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xED25;" FontSize="12" Margin="0,0,4,0" VerticalAlignment="Center"/>
+            <TextBlock Text="手動選取" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
+
         <ComboBox x:Name="VaultComboBox"
                   Height="26"
                   Margin="0,0,6,0"
                   VerticalContentAlignment="Center"
                   DisplayMemberPath="DisplayText"
                   SelectionChanged="VaultComboBox_OnSelectionChanged"
-                  ToolTip="選擇要使用的本機 Vault（點擊「重新整理」以掃描已安裝的 Vault）" />
+                  ToolTip="選擇要使用的本機 Vault（點擊「重新整理」以掃描，或「手動選取」直接指定資料夾）" />
       </DockPanel>
     </Border>
 

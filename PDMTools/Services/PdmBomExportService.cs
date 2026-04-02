@@ -173,8 +173,9 @@ namespace PDMTools.Services
         private static void TryGetVaultViewsFromRegistry(
             List<(string, string)> result, StringBuilder diag)
         {
-            // PDM 在不同版本與安裝語系下可能使用不同的 Registry 路徑
-            var candidates = new[]
+            // PDM 在不同版本與安裝語系下可能使用不同的 Registry 路徑。
+            // 每個路徑以 (Hive, SubPath) 表示，同時掃描 HKLM 與 HKCU。
+            var subPaths = new[]
             {
                 @"SOFTWARE\SolidWorks\Applications\PDMWorks Enterprise\Databases",
                 @"SOFTWARE\WOW6432Node\SolidWorks\Applications\PDMWorks Enterprise\Databases",
@@ -184,40 +185,52 @@ namespace PDMTools.Services
                 @"SOFTWARE\WOW6432Node\SolidWorks\Applications\PDMWorks Enterprise\Settings\Databases",
             };
 
-            foreach (var regPath in candidates)
+            // 同時掃描 HKLM（系統級安裝）與 HKCU（使用者級設定）
+            var hives = new[]
             {
-                try
+                (Microsoft.Win32.Registry.LocalMachine, "HKLM"),
+                (Microsoft.Win32.Registry.CurrentUser,  "HKCU"),
+            };
+
+            foreach (var (hive, hiveName) in hives)
+            {
+                foreach (var regPath in subPaths)
                 {
-                    using (var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(regPath))
+                    try
                     {
-                        if (key == null) { diag.AppendLine($"  HKLM\\{regPath} 不存在"); continue; }
-
-                        var subNames = key.GetSubKeyNames();
-                        diag.AppendLine($"  HKLM\\{regPath} 找到 {subNames.Length} 個子機碼");
-
-                        foreach (var sub in subNames)
+                        using (var key = hive.OpenSubKey(regPath))
                         {
-                            using (var subKey = key.OpenSubKey(sub))
+                            if (key == null) { diag.AppendLine($"  {hiveName}\\{regPath} 不存在"); continue; }
+
+                            var subNames = key.GetSubKeyNames();
+                            diag.AppendLine($"  {hiveName}\\{regPath} 找到 {subNames.Length} 個子機碼");
+
+                            foreach (var sub in subNames)
                             {
-                                if (subKey == null) continue;
-                                var vaultName = subKey.GetValue("VaultName") as string
-                                             ?? subKey.GetValue("Name")      as string
-                                             ?? sub;
-                                var localPath = subKey.GetValue("LocalPath")  as string
-                                             ?? subKey.GetValue("RootPath")   as string
-                                             ?? subKey.GetValue("ViewPath")   as string
-                                             ?? string.Empty;
-                                diag.AppendLine($"    {sub}: VaultName={vaultName}, Path={localPath}");
-                                if (!string.IsNullOrWhiteSpace(vaultName))
-                                    result.Add((vaultName, localPath));
+                                using (var subKey = key.OpenSubKey(sub))
+                                {
+                                    if (subKey == null) continue;
+                                    var vaultName = subKey.GetValue("VaultName") as string
+                                                 ?? subKey.GetValue("Name")      as string
+                                                 ?? sub;
+                                    var localPath = subKey.GetValue("LocalPath")  as string
+                                                 ?? subKey.GetValue("RootPath")   as string
+                                                 ?? subKey.GetValue("ViewPath")   as string
+                                                 ?? string.Empty;
+                                    diag.AppendLine($"    {sub}: VaultName={vaultName}, Path={localPath}");
+                                    if (!string.IsNullOrWhiteSpace(vaultName)
+                                        && !result.Any(r => string.Equals(r.VaultName, vaultName,
+                                            StringComparison.OrdinalIgnoreCase)))
+                                        result.Add((vaultName, localPath));
+                                }
                             }
+                            if (result.Count > 0) return;
                         }
-                        if (result.Count > 0) return;
                     }
-                }
-                catch (Exception ex)
-                {
-                    diag.AppendLine($"  {regPath} 讀取例外：{ex.Message}");
+                    catch (Exception ex)
+                    {
+                        diag.AppendLine($"  {hiveName}\\{regPath} 讀取例外：{ex.Message}");
+                    }
                 }
             }
         }

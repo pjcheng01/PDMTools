@@ -307,6 +307,51 @@ namespace PDMTools
             PopulateVaultComboBox(restoreLastSelection: false);
         }
 
+        private void BrowseVaultButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            // 使用 WPF 資料夾瀏覽對話框
+            using (var dlg = new System.Windows.Forms.FolderBrowserDialog
+            {
+                Description = "請選取 Vault 本機根目錄資料夾（例如 C:\\CP-PDM）",
+                ShowNewFolderButton = false,
+                SelectedPath = Directory.Exists(PdmBomExportService.VaultRootPath)
+                    ? PdmBomExportService.VaultRootPath
+                    : Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
+            })
+            {
+                if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+
+                var selectedPath = dlg.SelectedPath;
+                if (string.IsNullOrWhiteSpace(selectedPath)) return;
+
+                // 以資料夾名稱作為 Vault 名稱的預設值
+                var vaultName = Path.GetFileName(selectedPath.TrimEnd('\\', '/'));
+                if (string.IsNullOrWhiteSpace(vaultName))
+                    vaultName = selectedPath;
+
+                // 加入 ComboBox（若已存在相同路徑則直接選取）
+                _suppressVaultSelectionChanged = true;
+                for (int i = 0; i < VaultComboBox.Items.Count; i++)
+                {
+                    if (VaultComboBox.Items[i] is VaultComboBoxItem existing
+                        && string.Equals(existing.LocalPath, selectedPath, StringComparison.OrdinalIgnoreCase))
+                    {
+                        _suppressVaultSelectionChanged = false;
+                        VaultComboBox.SelectedIndex = i;
+                        ApplyVaultSelection(existing);
+                        return;
+                    }
+                }
+
+                // 新增手動選取的項目（插入至清單最前面）
+                var manualItem = new VaultComboBoxItem { VaultName = vaultName, LocalPath = selectedPath };
+                VaultComboBox.Items.Insert(0, manualItem);
+                _suppressVaultSelectionChanged = false;
+                VaultComboBox.SelectedIndex = 0;
+                ApplyVaultSelection(manualItem);
+            }
+        }
+
         /// <summary>
         /// 將選取的 Vault 套用到服務層，並重設 _exportService 以強制使用新 Vault。
         /// </summary>
