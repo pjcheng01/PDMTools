@@ -37,6 +37,12 @@ namespace PDMTools.Models
         /// <summary>上次使用（套用）的欄位組合名稱。</summary>
         public string LastUsedProfileName { get; set; } = string.Empty;
 
+        /// <summary>上次選取的 Vault 名稱（顯示名，用於下拉選單預設選取）。</summary>
+        public string LastSelectedVaultName { get; set; } = string.Empty;
+
+        /// <summary>上次選取的 Vault 本機根目錄路徑（例如 C:\CP-PDM）。</summary>
+        public string LastSelectedVaultPath { get; set; } = string.Empty;
+
         public bool IsEmpty => SelectedVariables == null || SelectedVariables.Count == 0;
 
         /// <summary>
@@ -75,14 +81,18 @@ namespace PDMTools.Models
                 var profileNames = ExtractArray(json, "profileNames") ?? new List<string>();
                 var profileData  = ExtractArray(json, "profileSelected") ?? new List<string>();
                 var lastUsed     = ExtractString(json, "lastUsedProfile") ?? string.Empty;
+                var lastVaultName = ExtractString(json, "lastVaultName") ?? string.Empty;
+                var lastVaultPath = ExtractString(json, "lastVaultPath") ?? string.Empty;
                 var profiles     = BuildProfiles(profileNames, profileData);
                 return new ColumnSettings
                 {
-                    SelectedVariables  = selected,
-                    KnownVariables     = known,
+                    SelectedVariables    = selected,
+                    KnownVariables       = known,
                     SelectedFixedColumns = fixedColumns,   // null 保留，讓程式預設全顯示
-                    ColumnProfiles = profiles,
-                    LastUsedProfileName = lastUsed
+                    ColumnProfiles       = profiles,
+                    LastUsedProfileName  = lastUsed,
+                    LastSelectedVaultName = lastVaultName,
+                    LastSelectedVaultPath = lastVaultPath
                 };
             }
             catch
@@ -109,6 +119,10 @@ namespace PDMTools.Models
                     + BuildJsonStringArray((ColumnProfiles ?? new List<ColumnPresetProfile>()).Select(p => JoinProfileColumns(p?.SelectedItems)))
                     + ",\"lastUsedProfile\":"
                     + BuildJsonString(LastUsedProfileName)
+                    + ",\"lastVaultName\":"
+                    + BuildJsonString(LastSelectedVaultName)
+                    + ",\"lastVaultPath\":"
+                    + BuildJsonString(LastSelectedVaultPath)
                     + "}";
                 File.WriteAllText(FilePath, json, Encoding.UTF8);
             }

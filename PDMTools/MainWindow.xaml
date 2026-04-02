@@ -240,17 +240,58 @@
 
   <Grid>
     <Grid.RowDefinitions>
-      <RowDefinition Height="Auto" />  <!-- 0: 檔案路徑列 -->
-      <RowDefinition Height="Auto" />  <!-- 1: 模式選擇 + 快照 -->
-      <RowDefinition Height="Auto" />  <!-- 2: 功能工具列 -->
-      <RowDefinition Height="*"    />  <!-- 3: 資料表格區 -->
-      <RowDefinition Height="Auto" />  <!-- 4: 狀態列 -->
+      <RowDefinition Height="Auto" />  <!-- 0: Vault 選擇列 -->
+      <RowDefinition Height="Auto" />  <!-- 1: 檔案路徑列 -->
+      <RowDefinition Height="Auto" />  <!-- 2: 模式選擇 + 快照 -->
+      <RowDefinition Height="Auto" />  <!-- 3: 功能工具列 -->
+      <RowDefinition Height="*"    />  <!-- 4: 資料表格區 -->
+      <RowDefinition Height="Auto" />  <!-- 5: 狀態列 -->
     </Grid.RowDefinitions>
 
     <!-- ══════════════════════════════════════════════
-         Row 0 — 檔案路徑列
+         Row 0 — Vault 選擇列
     ══════════════════════════════════════════════ -->
-    <Grid Grid.Row="0" Margin="12,10,12,0">
+    <Border Grid.Row="0"
+            Margin="12,10,12,0"
+            Background="#FFF0F9FF"
+            BorderBrush="#FFB0D4F0"
+            BorderThickness="1"
+            CornerRadius="4"
+            Padding="10,5">
+      <DockPanel>
+        <TextBlock Text="Vault："
+                   VerticalAlignment="Center"
+                   Foreground="#FF1E40AF"
+                   FontWeight="SemiBold"
+                   Margin="0,0,8,0" />
+
+        <Button x:Name="RefreshVaultListButton"
+                DockPanel.Dock="Right"
+                Height="26"
+                Padding="8,0"
+                Style="{StaticResource SmallButtonStyle}"
+                Click="RefreshVaultListButton_OnClick"
+                ToolTip="重新掃描本機已安裝的 Vault 清單">
+          <StackPanel Orientation="Horizontal">
+            <TextBlock FontFamily="Segoe MDL2 Assets" Text="&#xE72C;" FontSize="12" Margin="0,0,4,0" VerticalAlignment="Center"/>
+            <TextBlock Text="重新整理" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Button>
+
+        <ComboBox x:Name="VaultComboBox"
+                  Height="26"
+                  Margin="0,0,6,0"
+                  VerticalContentAlignment="Center"
+                  DisplayMemberPath="DisplayText"
+                  SelectionChanged="VaultComboBox_OnSelectionChanged"
+                  ToolTip="選擇要使用的本機 Vault（點擊「重新整理」以掃描已安裝的 Vault）" />
+      </DockPanel>
+    </Border>
+
+    <!-- ══════════════════════════════════════════════
+         Row 1 — 檔案路徑列
+    ══════════════════════════════════════════════ -->
+    <Grid Grid.Row="1" Margin="12,8,12,0">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="Auto" />
         <ColumnDefinition Width="*" />
@@ -301,9 +342,9 @@
     </Grid>
 
     <!-- ══════════════════════════════════════════════
-         Row 1 — 作業模式 + 快照
+         Row 2 — 作業模式 + 快照
     ══════════════════════════════════════════════ -->
-    <Border Grid.Row="1"
+    <Border Grid.Row="2"
             Margin="12,8,12,0"
             Background="#FFF9FAFB"
             BorderBrush="#FFE5E7EB"
@@ -360,9 +401,9 @@
     </Border>
 
     <!-- ══════════════════════════════════════════════
-         Row 2 — 功能工具列（三個分區）
+         Row 3 — 功能工具列（三個分區）
     ══════════════════════════════════════════════ -->
-    <Grid Grid.Row="2" Margin="12,8,12,0">
+    <Grid Grid.Row="3" Margin="12,8,12,0">
       <Grid.RowDefinitions>
         <RowDefinition Height="Auto" />   <!-- BOM 參數設定區 -->
         <RowDefinition Height="Auto" />   <!-- 主操作 + 匯出 + 進階 -->
@@ -592,9 +633,9 @@
     </Grid>
 
     <!-- ══════════════════════════════════════════════
-         Row 3 — 資料表格區
+         Row 4 — 資料表格區
     ══════════════════════════════════════════════ -->
-    <Grid Grid.Row="3" Margin="12,8,12,0">
+    <Grid Grid.Row="4" Margin="12,8,12,0">
 
       <!-- Vault BOM 模式 -->
       <Grid x:Name="BomModeContentPanel" Visibility="Visible">
@@ -749,9 +790,9 @@
     </Grid>
 
     <!-- ══════════════════════════════════════════════
-         Row 4 — 狀態列（狀態文字 + 進度列）
+         Row 5 — 狀態列（狀態文字 + 進度列）
     ══════════════════════════════════════════════ -->
-    <Border Grid.Row="4"
+    <Border Grid.Row="5"
             Background="#FFF3F4F6"
             BorderBrush="#FFE5E7EB"
             BorderThickness="1"

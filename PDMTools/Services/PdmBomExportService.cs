@@ -16,7 +16,14 @@ namespace PDMTools.Services
 {
     public sealed class PdmBomExportService
     {
-        public const string VaultRootPath = @"C:\CP-PDM";
+        /// <summary>Vault 本機根目錄路徑。可由 UI 在執行期動態設定（預設為安裝時的路徑）。</summary>
+        public static string VaultRootPath { get; set; } = @"C:\CP-PDM";
+
+        /// <summary>
+        /// 指定登入時優先嘗試的 Vault 名稱（例如從 UI 下拉選單選取的名稱）。
+        /// 設定後，EnsureVaultLogin 會將此名稱排在候選清單的第一位。
+        /// </summary>
+        public string OverrideVaultName { get; set; }
         // 依 PDM 變數名稱抓值（優先使用實際變數代號，而非畫面顯示標籤）
         private static readonly CardVariableSpec[] CardVariableSpecs =
         {
@@ -2679,8 +2686,14 @@ namespace PDMTools.Services
 
             // ── 建立候選 Vault 名稱清單 ──────────────────────────────────────
             var candidates = new List<string>();
+
+            // 優先使用 UI 明確選取的 Vault 名稱（若有設定）
+            if (!string.IsNullOrWhiteSpace(OverrideVaultName))
+                candidates.Add(OverrideVaultName);
+
             var resolved = ResolveVaultNameFromPathSafe(VaultRootPath);
-            if (!string.IsNullOrWhiteSpace(resolved))
+            if (!string.IsNullOrWhiteSpace(resolved)
+                && !candidates.Contains(resolved, StringComparer.OrdinalIgnoreCase))
                 candidates.Add(resolved);
 
             var folderName = Path.GetFileName(VaultRootPath.TrimEnd('\\', '/'));

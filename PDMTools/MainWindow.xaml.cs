@@ -27,7 +27,19 @@ namespace PDMTools
 {
     public partial class MainWindow : Window
     {
-        private const string VaultRootPath = @"C:\CP-PDM";
+        // VaultRootPath 已移至 PdmBomExportService.VaultRootPath（靜態可設定屬性）
+
+        /// <summary>VaultComboBox 的項目資料物件。</summary>
+        private sealed class VaultComboBoxItem
+        {
+            public string VaultName { get; set; }
+            public string LocalPath { get; set; }
+            /// <summary>顯示於下拉選單的文字（DisplayMemberPath 對應此屬性）。</summary>
+            public string DisplayText => string.IsNullOrWhiteSpace(LocalPath)
+                ? VaultName
+                : $"{VaultName}  ({LocalPath})";
+        }
+
         /// <summary>與程式執行檔同層之下存放 JSON 快照的資料夾名稱。</summary>
         private const string SnapshotLibraryFolderName = "PdmSnapshots";
         private const int MaxRecentAssemblyPaths = 12;
@@ -38,6 +50,20 @@ namespace PDMTools
         /// <summary>參考稽核預覽篩選：路徑是否落在 S 槽（不區分大小寫）。</summary>
         private const string ReferenceAuditSDriveFolderPrefix = @"S:\";
         private PdmBomExportService _exportService;
+        private string _selectedVaultName;   // 目前 UI 選取的 Vault 名稱，用於設定 OverrideVaultName
+
+        /// <summary>取得（或建立）匯出服務實例，並套用目前選取的 Vault 設定。</summary>
+        private PdmBomExportService GetOrCreateExportService()
+        {
+            if (_exportService == null)
+            {
+                _exportService = new PdmBomExportService
+                {
+                    OverrideVaultName = _selectedVaultName ?? string.Empty
+                };
+            }
+            return _exportService;
+        }
         private readonly ObservableCollection<BomItem> _bomItems = new ObservableCollection<BomItem>();
         private readonly CardVariableLookupConverter _cardVariableConverter = new CardVariableLookupConverter();
         private readonly Dictionary<string, ColumnFilterState> _columnFilters =
@@ -193,10 +219,110 @@ namespace PDMTools
                 return;   // PDM 未安裝，跳過變數偵測
             }
 
+            // ── 填充 Vault 下拉選單（從上次設定還原或自動掃描）────────────────
+            PopulateVaultComboBox(restoreLastSelection: true);
+
             // ── 先讓視窗完成第一輪繪製，再做背景作業 ────────────────────────
             await Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
             await Task.Delay(800);
             await CheckForNewVaultVariablesAsync();
+        }
+
+        // ════════════════════════════════════════════════════════════════════
+        // Vault 選擇 UI
+        // ════════════════════════════════════════════════════════════════════
+
+        /// <summary>
+        /// 掃描本機已安裝的 Vault 清單並填充下拉選單。
+        /// </summary>
+        /// <param name="restoreLastSelection">
+        /// true：嘗試從 columns.json 還原上次選取的 Vault；
+        /// false：掃描後保留目前選取或選第一個。
+        /// </param>
+        private void PopulateVaultComboBox(bool restoreLastSelection = false)
+        {
+            var views = PdmBomExportService.GetLocalVaultViews();
+
+            _suppressVaultSelectionChanged = true;
+            VaultComboBox.Items.Clear();
+
+            if (views.Count == 0)
+            {
+                var placeholder = new VaultComboBoxItem { VaultName = "（找不到本機 Vault）", LocalPath = string.Empty };
+                VaultComboBox.Items.Add(placeholder);
+                VaultComboBox.SelectedIndex = 0;
+                _suppressVaultSelectionChanged = false;
+                return;
+            }
+
+            string lastVaultName = string.Empty;
+            string lastVaultPath = string.Empty;
+            if (restoreLastSelection)
+            {
+                var settings = ColumnSettings.Load();
+                lastVaultName = settings.LastSelectedVaultName ?? string.Empty;
+                lastVaultPath = settings.LastSelectedVaultPath ?? string.Empty;
+            }
+
+            int selectIndex = 0;
+            for (int i = 0; i < views.Count; i++)
+            {
+                var item = new VaultComboBoxItem { VaultName = views[i].VaultName, LocalPath = views[i].LocalPath };
+                VaultComboBox.Items.Add(item);
+
+                // 優先按名稱比對還原；若名稱相同但路徑也匹配，更精準
+                if (!string.IsNullOrEmpty(lastVaultName)
+                    && string.Equals(item.VaultName, lastVaultName, StringComparison.OrdinalIgnoreCase))
+                {
+                    selectIndex = i;
+                    if (string.IsNullOrEmpty(lastVaultPath)
+                        || string.Equals(item.LocalPath, lastVaultPath, StringComparison.OrdinalIgnoreCase))
+                        break;
+                }
+            }
+
+            _suppressVaultSelectionChanged = false;
+            VaultComboBox.SelectedIndex = selectIndex;   // 觸發 SelectionChanged → ApplyVaultSelection
+        }
+
+        private bool _suppressVaultSelectionChanged;
+
+        private void VaultComboBox_OnSelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            if (_suppressVaultSelectionChanged) return;
+            if (VaultComboBox.SelectedItem is not VaultComboBoxItem item) return;
+            if (string.IsNullOrWhiteSpace(item.VaultName) || item.VaultName.StartsWith("（")) return;
+
+            ApplyVaultSelection(item);
+        }
+
+        private void RefreshVaultListButton_OnClick(object sender, RoutedEventArgs e)
+        {
+            PopulateVaultComboBox(restoreLastSelection: false);
+        }
+
+        /// <summary>
+        /// 將選取的 Vault 套用到服務層，並重設 _exportService 以強制使用新 Vault。
+        /// </summary>
+        private void ApplyVaultSelection(VaultComboBoxItem item)
+        {
+            // 更新靜態路徑與選取的 Vault 名稱
+            PdmBomExportService.VaultRootPath = item.LocalPath;
+            _selectedVaultName = item.VaultName;
+            _exportService = null;   // 強制下次操作建立新的 service 實例（帶 OverrideVaultName）
+
+            StatusTextBlock.Text = $"已選取 Vault：{item.VaultName}  ({item.LocalPath})";
+            StatusTextBlock.Foreground = new SolidColorBrush(Color.FromRgb(0x1E, 0x40, 0xAF));
+
+            // 持久化選取的 Vault
+            try
+            {
+                var settings = ColumnSettings.Load();
+                settings.LastSelectedVaultName = item.VaultName;
+                settings.LastSelectedVaultPath = item.LocalPath;
+                settings.Save();
+            }
+            catch { /* 無法寫入設定時靜默忽略 */ }
         }
 
 
@@ -560,8 +686,8 @@ namespace PDMTools
                     Filter = "SolidWorks Assembly (*.sldasm)|*.sldasm",
                     CheckFileExists = true,
                     Multiselect = false,
-                    InitialDirectory = Directory.Exists(VaultRootPath)
-                        ? VaultRootPath
+                    InitialDirectory = Directory.Exists(PdmBomExportService.VaultRootPath)
+                        ? PdmBomExportService.VaultRootPath
                         : Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)
                 };
 
@@ -596,8 +722,8 @@ namespace PDMTools
             {
                 Title = "選擇 SolidWorks 組合件",
                 Filter = "SolidWorks Assembly (*.sldasm)|*.sldasm",
-                InitialDirectory = Directory.Exists(VaultRootPath)
-                    ? VaultRootPath
+                InitialDirectory = Directory.Exists(PdmBomExportService.VaultRootPath)
+                    ? PdmBomExportService.VaultRootPath
                     : Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),
                 CheckFileExists = true,
                 Multiselect = false
@@ -688,7 +814,7 @@ namespace PDMTools
                 await Dispatcher.InvokeAsync(() =>
                 {
                     rows = (_referenceAuditService ??= new SolidWorksReferenceAuditService())
-                        .AuditAssembly(path, VaultRootPath, maxAuditDepth, includeDrw);
+                        .AuditAssembly(path, PdmBomExportService.VaultRootPath, maxAuditDepth, includeDrw);
                 }, DispatcherPriority.Normal);
 
                 rows ??= Array.Empty<ReferenceAuditRow>();
@@ -700,8 +826,8 @@ namespace PDMTools
                     !r.IsUnderVaultRoot && !string.IsNullOrWhiteSpace(r.FullPath));
                 var drwCount = rows.Count(r => r.IsDrawing);
                 StatusTextBlock.Text = includeDrw
-                    ? $"稽核完成，共 {rows.Count} 筆（含工程圖 {drwCount} 筆；其中 {notInVault} 筆路徑不在 Vault 根目錄 {VaultRootPath} 下）。"
-                    : $"稽核完成，共 {rows.Count} 筆引用（其中 {notInVault} 筆路徑不在 Vault 根目錄 {VaultRootPath} 下）。";
+                    ? $"稽核完成，共 {rows.Count} 筆（含工程圖 {drwCount} 筆；其中 {notInVault} 筆路徑不在 Vault 根目錄 {PdmBomExportService.VaultRootPath} 下）。"
+                    : $"稽核完成，共 {rows.Count} 筆引用（其中 {notInVault} 筆路徑不在 Vault 根目錄 {PdmBomExportService.VaultRootPath} 下）。";
                 ExportReferenceAuditButton.IsEnabled = rows.Count > 0;
                 _auditRowsView?.Refresh();
                 UpdateAuditPreviewCountLabel();
@@ -1152,7 +1278,7 @@ namespace PDMTools
                 progressWin.Show();
                 progressWin.Activate();
 
-                _exportService = _exportService ?? new PdmBomExportService();
+                _exportService = GetOrCreateExportService();
                 var withDrawings = await _exportService.AppendDrawingItemsAsync(
                     _rawBomItems,
                     _activeCardVarNames,
@@ -1214,7 +1340,7 @@ namespace PDMTools
             IReadOnlyList<string> allVars = null;
             try
             {
-                _exportService = _exportService ?? new PdmBomExportService();
+                _exportService = GetOrCreateExportService();
                 // 傳入目前選取的組合件路徑作為樣本，供 Vault 層級失敗時改從檔案列舉
                 var samplePath = AssemblyPathTextBox.Text?.Trim();
                 allVars = await _exportService.EnumerateVaultVariablesAsync(samplePath);
@@ -1328,7 +1454,7 @@ namespace PDMTools
             IReadOnlyList<string> vaultVars;
             try
             {
-                _exportService = _exportService ?? new PdmBomExportService();
+                _exportService = GetOrCreateExportService();
                 var enumTask = _exportService.EnumerateVaultVariablesAsync(
                     AssemblyPathTextBox.Text?.Trim());
                 var completed = await Task.WhenAny(enumTask, Task.Delay(5000));
@@ -1591,7 +1717,7 @@ namespace PDMTools
 
             try
             {
-                _exportService = _exportService ?? new PdmBomExportService();
+                _exportService = GetOrCreateExportService();
                 var cfgs = await _exportService.GetAssemblyConfigurationsAsync(assemblyPath);
                 var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var ordered = new List<string>();
@@ -1745,7 +1871,7 @@ namespace PDMTools
                 progressWin.Show();
                 progressWin.Activate();
 
-                _exportService = _exportService ?? new PdmBomExportService();
+                _exportService = GetOrCreateExportService();
                 progress.Report(new ProgressInfo(0, "開始抓取 BOM 與資料卡…"));
                 _bomItems.Clear();
                 ClearAllFiltersSilently();
@@ -1843,7 +1969,7 @@ namespace PDMTools
 
             try
             {
-                _exportService = _exportService ?? new PdmBomExportService();
+                _exportService = GetOrCreateExportService();
                 var displayLabel = string.IsNullOrWhiteSpace(label) ? string.Empty : $"（{label}）";
                 progress.Report(new ProgressInfo(0, $"正在匯出 Excel{displayLabel}..."));
 
@@ -2059,7 +2185,7 @@ namespace PDMTools
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
 
-            _exportService = _exportService ?? new PdmBomExportService();
+            _exportService = GetOrCreateExportService();
             var win = new BatchWorkflowTransitionWindow(paths, _exportService)
             {
                 Owner = this
@@ -2086,7 +2212,7 @@ namespace PDMTools
                 return;
             }
 
-            _exportService = _exportService ?? new PdmBomExportService();
+            _exportService = GetOrCreateExportService();
             var win = new BatchDrawingPdfWindow(drawings, _exportService)
             {
                 Owner = this
@@ -2111,7 +2237,7 @@ namespace PDMTools
                 return;
             }
 
-            _exportService = _exportService ?? new PdmBomExportService();
+            _exportService = GetOrCreateExportService();
             var win = new DrawingSheetFormatWindow(drawings, _exportService)
             {
                 Owner = this
@@ -2136,7 +2262,7 @@ namespace PDMTools
                 return;
             }
 
-            _exportService = _exportService ?? new PdmBomExportService();
+            _exportService = GetOrCreateExportService();
             var win = new CustomPropertyTemplateWindow(items, _exportService)
             {
                 Owner = this
@@ -2395,12 +2521,12 @@ namespace PDMTools
                 return false;
             }
 
-            var fullVaultRoot = Path.GetFullPath(VaultRootPath)
+            var fullVaultRoot = Path.GetFullPath(PdmBomExportService.VaultRootPath)
                 .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             var rootWithSep = fullVaultRoot + Path.DirectorySeparatorChar;
             if (!normalizedPath.StartsWith(rootWithSep, StringComparison.OrdinalIgnoreCase))
             {
-                errorMessage = $"檔案必須位於 Vault 路徑內：{VaultRootPath}";
+                errorMessage = $"檔案必須位於 Vault 路徑內：{PdmBomExportService.VaultRootPath}";
                 return false;
             }
 
